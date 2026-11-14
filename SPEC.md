@@ -4,26 +4,23 @@ Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with
 
 ## Problem
 
-iPhone photos arrive as HEIC and web images as WebP or AVIF, which many Windows apps, websites and printers reject. The Store's converters are free to download but charge $10-$34 before they do anything useful, and their top complaint is 'not free'.
+Windows keeps the battery level of Bluetooth devices several clicks deep in Settings and gives no warning when one is about to run out. People find out when the mouse stops or the headphones cut out.
 
 ## Features (1.0)
 
-- Drag and drop files or folders, or pick them, to queue HEIC/HEIF, WebP, AVIF, JXL, JPG, PNG, BMP, TIFF and GIF images
-- Convert to JPG (with quality), PNG or WebP, optionally resizing to a maximum long edge
-- Output next to the source or into a chosen folder, never overwriting an existing file
-- HEIC, AVIF and JXL are decoded through Windows' own codecs; when one is missing, say which Store extension is needed and link to it
-- Free: every feature, three files per run. A one-off unlock (licence key, checked offline) removes the limit
-- Keeps photo orientation and the file's modified time
+- Read the battery level of paired Bluetooth devices: classic Bluetooth from the level Windows holds for the device, Bluetooth LE from the GATT Battery Service
+- Tray icon with the percentage of one chosen device drawn into it; every device in the tooltip and the tray menu
+- Closing the window hides it to the tray; the tray menu has Open and Quit
+- A window with one card per device: name, kind, level bar, and for a device that is off, its last level and how long ago
+- A plain "this device does not report its battery level" instead of a guess
+- Low-battery warning at a threshold the user sets (default 20%), once per discharge, re-armed when the level rises above the threshold
+- "Start with Windows" (current user's Run key, no admin rights)
+- Polls in a background thread about once a minute; the window never waits for Bluetooth
+- Free: every device's level in the window, tooltip and menu, plus the tray icon and the low-battery warning for one chosen device. A one-off unlock (£2.99, licence key, checked offline) gives low-battery warnings for every device
 
 ## Non-goals
 
-- No bundled HEVC decoder
-- No editing, cropping or filters
-- No cloud upload; images never leave the PC
-- No writing HEIC or AVIF
-
-## Evidence of demand
-
-- https://apps.microsoft.com/search?query=heic+converter
-- https://windowslatest.com/2025/07/16/can-you-get-hevc-codec-for-free-on-windows-11
-- https://blogs.windows.com/windowsexperience/2026/10/15/meet-the-new-photos-app-on-windows-11/
+- No vendor protocols: no separate levels for each earbud and the case
+- No pairing, connecting or audio switching
+- No laptop battery
+- No wired devices and no 2.4 GHz USB receivers

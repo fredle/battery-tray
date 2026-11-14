@@ -1,35 +1,52 @@
-//! The window: a queue of images, the output options, and the worker threads
-//! that convert them. The footer with the auto-update toggle and version is
-//! required on every factory app. Colours and type come from `theme.rs`.
+//! The window: a card for each paired Bluetooth device, the low-battery
+//! banner and the few settings. It only shows what the monitor thread last
+//! found, so it never waits for Bluetooth. Closing it hides it; the app
+//! lives on in the tray (`tray.rs`). The footer with the auto-update toggle
+//! and version is required on every factory app. Colours and type come from
+//! `theme.rs`.
 
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{self, Align, Align2, FontId, Layout, RichText, Stroke, StrokeKind};
+use eframe::egui::{self, Align, Align2, FontId, Layout, RichText, Stroke};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::convert::{Codec, ConvertError, Format, Options};
+use crate::autostart;
+use crate::devices::{self, Ago, Device, Kind, State};
 use crate::i18n::{Lang, Strings, fill};
 use crate::license;
+use crate::monitor::{self, Monitor, Shared, SharedState, lock};
 use crate::theme::{self, Palette};
+use crate::tray::{self, Tray};
 
-const WIDTH: f32 = 720.0;
-const HEIGHT: f32 = 620.0;
+const WIDTH: f32 = 560.0;
+const HEIGHT: f32 = 720.0;
 const APP_NAME: &str = "Battery Tray";
-/// Marks a decoder crash; shown to the user as the translated "couldn't read".
-const PANIC_MESSAGE: &str = "decoder panicked";
 /// Space between the window edge and its contents.
 const GUTTER: i8 = 16;
-const ROW_HEIGHT: f32 = 36.0;
-const FORMATS: &str = "HEIC · WebP · AVIF · JXL · JPG · PNG · BMP · TIFF · GIF";
+/// Where the window is created when the app starts in the tray.
+const OFF_SCREEN: [f32; 2] = [-20000.0, -20000.0];
+/// The lowest and highest warning threshold the user can set, in percent.
+const THRESHOLDS: std::ops::RangeInclusive<u8> = 5..=50;
 
 pub fn run(args: Vec<String>) -> eframe::Result<()> {
+    // Started by Windows at sign-in: stay in the tray.
+    let in_tray = args.iter().any(|arg| arg == autostart::TRAY_ARG);
+    // One copy is enough. A second start brings the first one's window up,
+    // unless it is only Windows starting the app at sign-in.
+    if tray::running_instance(!in_tray) {
+        return Ok(());
+    }
     let viewport = egui::ViewportBuilder::default()
         .with_title(APP_NAME)
         .with_inner_size([WIDTH, HEIGHT])
-        .with_min_inner_size([560.0, 480.0])
-        .with_drag_and_drop(true);
+        .with_min_inner_size([460.0, 420.0]);
+    // eframe always shows its window after the first frame, so a tray start
+    // opens it off-screen and hides it on the second (see `App::ui`).
+    let viewport = if in_tray {
+        viewport.with_position(OFF_SCREEN)
+    } else {
+        viewport
+    };
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -37,35 +54,20 @@ pub fn run(args: Vec<String>) -> eframe::Result<()> {
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(args, &cc.egui_ctx)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, in_tray)))),
     )
 }
-
-#[derive(Clone, Debug, PartialEq)]
-enum Status {
-    Waiting,
-    Converting,
-    Done(PathBuf),
-    Failed(ConvertError),
-}
-
-struct Item {
-    path: PathBuf,
-    status: Status,
-}
-
-type JobResult = (usize, Result<PathBuf, ConvertError>);
 
 pub struct App {
     settings: crate::settings::Settings,
     version: String,
-    items: Vec<Item>,
-    results: Option<Receiver<JobResult>>,
-    in_flight: usize,
-    /// How many files the current run started with, for the progress bar.
-    run_total: usize,
-    /// Folder of the most recent successful conversion, for "Open folder".
-    last_output_dir: Option<PathBuf>,
+    shared: SharedState,
+    monitor: Monitor,
+    /// `None` if the tray icon could not be created; closing then quits.
+    tray: Option<Tray>,
+    /// Frames left until a tray start hides the window; `None` otherwise.
+    hide_in: Option<u8>,
+    autostart: bool,
     licensed_to: Option<String>,
     unlock_open: bool,
     key_entry: String,
@@ -74,8 +76,16 @@ pub struct App {
     t: &'static Strings,
 }
 
+fn main_window(cc: &eframe::CreationContext<'_>) -> Option<isize> {
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
 impl App {
-    fn new(args: Vec<String>, ctx: &egui::Context) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, in_tray: bool) -> Self {
+        let ctx = &cc.egui_ctx;
         let settings = crate::settings::load();
         let licensed_to = license::verify(&settings.license_key);
         let lang = settings.language.unwrap_or_else(Lang::system);
@@ -87,29 +97,67 @@ impl App {
             Ok("light") => ctx.set_theme(egui::Theme::Light),
             _ => {}
         }
-        let mut app = Self {
+
+        let shared: SharedState = Arc::new(Mutex::new(Shared {
+            devices: devices::load(),
+            polled: false,
+            tray_device: settings.tray_device.clone(),
+            threshold: settings.threshold,
+            licensed: licensed_to.is_some(),
+            lang,
+            pending: Vec::new(),
+        }));
+        let tray = main_window(cc).and_then(|window| Tray::start(shared.clone(), window, ctx.clone()));
+        if tray.is_none() && in_tray {
+            // No tray to open it from: put the window where it can be seen.
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(80.0, 80.0)));
+        }
+        let repaint = ctx.clone();
+        let monitor = Monitor::start(crate::source::pick(), shared.clone(), move || {
+            if let Some(tray) = tray {
+                tray.refresh();
+            }
+            repaint.request_repaint();
+        });
+
+        let autostart = autostart::enabled();
+        if autostart {
+            // Keep the entry pointing at this copy if the app has moved.
+            autostart::set(true);
+        }
+        Self {
             lang,
             t: lang.strings(),
             settings,
             version: crate::update::current_version(),
-            items: Vec::new(),
-            results: None,
-            in_flight: 0,
-            run_total: 0,
-            last_output_dir: None,
+            shared,
+            monitor,
+            tray,
+            hide_in: (in_tray && tray.is_some()).then_some(1),
+            autostart,
             licensed_to,
             unlock_open: false,
             key_entry: String::new(),
             key_message: None,
-        };
-        // Files passed on the command line ("Open with", or dropped on the exe).
-        let paths: Vec<PathBuf> = args.into_iter().map(PathBuf::from).collect();
-        app.add_paths(&paths);
-        app
+        }
     }
 
     fn save(&self) {
         crate::settings::save(&self.settings);
+    }
+
+    /// Hands the settings the monitor and tray depend on to them.
+    fn share_settings(&self) {
+        {
+            let mut shared = lock(&self.shared);
+            shared.tray_device = self.settings.tray_device.clone();
+            shared.threshold = self.settings.threshold;
+            shared.licensed = self.licensed_to.is_some();
+            shared.lang = self.lang;
+        }
+        if let Some(tray) = self.tray {
+            tray.refresh();
+        }
     }
 
     fn set_language(&mut self, lang: Lang, ctx: &egui::Context) {
@@ -119,142 +167,22 @@ impl App {
         theme::install_fonts(ctx, &[lang, Lang::system()]);
         self.settings.language = Some(lang);
         self.save();
+        self.share_settings();
     }
 
-    fn format_label(&self, format: Format) -> String {
-        match format {
-            Format::Webp => format!("{} ({})", format.label(), self.t.lossless),
-            _ => format.label().to_owned(),
-        }
-    }
-
-    fn busy(&self) -> bool {
-        self.in_flight > 0
-    }
-
-    fn add_paths(&mut self, paths: &[PathBuf]) {
-        let existing: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
-        for path in crate::convert::collect_inputs(paths, &existing) {
-            self.items.push(Item {
-                path,
-                status: Status::Waiting,
-            });
-        }
-    }
-
-    fn options(&self) -> Options {
-        Options {
-            format: self.settings.format,
-            quality: self.settings.quality,
-            max_edge: self.settings.resize.then_some(self.settings.max_edge),
-            out_dir: self.settings.out_dir.clone(),
-        }
-    }
-
-    fn waiting(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|i| i.status == Status::Waiting)
-            .count()
-    }
-
-    fn start(&mut self, ctx: &egui::Context) {
-        let allowance = license::run_allowance(self.waiting(), self.licensed_to.is_some());
-        let mut jobs = VecDeque::new();
-        for (index, item) in self.items.iter_mut().enumerate() {
-            if jobs.len() == allowance {
-                break;
-            }
-            if item.status == Status::Waiting {
-                item.status = Status::Converting;
-                jobs.push_back((index, item.path.clone()));
-            }
-        }
-        if jobs.is_empty() {
-            return;
-        }
-        self.in_flight = jobs.len();
-        self.run_total = jobs.len();
-        let (sender, receiver) = channel();
-        self.results = Some(receiver);
-        spawn_workers(jobs, self.options(), sender, ctx.clone());
-    }
-
-    fn collect_results(&mut self) {
-        let Some(receiver) = &self.results else {
-            return;
-        };
-        while let Ok((index, result)) = receiver.try_recv() {
-            self.in_flight = self.in_flight.saturating_sub(1);
-            if let Some(item) = self.items.get_mut(index) {
-                item.status = match result {
-                    Ok(path) => {
-                        self.last_output_dir = path.parent().map(Path::to_path_buf);
-                        Status::Done(path)
-                    }
-                    Err(error) => Status::Failed(error),
-                };
-            }
-        }
-        if self.in_flight == 0 {
-            self.results = None;
-        }
-    }
-
-    fn retry_failed(&mut self) {
-        for item in &mut self.items {
-            if matches!(item.status, Status::Failed(_)) {
-                item.status = Status::Waiting;
-            }
-        }
-    }
-
-    fn missing_codecs(&self) -> Vec<Codec> {
-        let mut codecs = Vec::new();
-        for item in &self.items {
-            if let Status::Failed(ConvertError::MissingCodec(codec)) = item.status
-                && !codecs.contains(&codec)
-            {
-                codecs.push(codec);
-            }
-        }
-        codecs
+    /// Whether the free tier's one-device limit applies.
+    fn limited(&self) -> bool {
+        self.licensed_to.is_none() && license::paid_tier_enabled()
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, p: Palette) {
         let t = self.t;
         ui.horizontal(|ui| {
-            let idle = !self.busy();
-            if ui
-                .add_enabled(idle, egui::Button::new(t.add_photos))
-                .clicked()
-                && let Some(files) = rfd::FileDialog::new()
-                    .add_filter(
-                        t.images,
-                        &[
-                            "heic", "heif", "hif", "avif", "jxl", "webp", "jpg", "jpeg", "jfif",
-                            "png", "bmp", "tif", "tiff", "gif",
-                        ],
-                    )
-                    .add_filter(t.all_files, &["*"])
-                    .pick_files()
-            {
-                self.add_paths(&files);
-            }
-            if ui
-                .add_enabled(idle, egui::Button::new(t.add_folder))
-                .clicked()
-                && let Some(folder) = rfd::FileDialog::new().pick_folder()
-            {
-                self.add_paths(&[folder]);
-            }
-            if !self.items.is_empty()
-                && ui
-                    .add_enabled(idle, egui::Button::new(t.clear).frame(false))
-                    .clicked()
-            {
-                self.items.clear();
-            }
+            ui.label(
+                RichText::new(t.devices_title)
+                    .font(FontId::new(20.0, theme::semibold()))
+                    .color(p.text),
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(email) = &self.licensed_to {
                     ui.label(
@@ -268,316 +196,186 @@ impl App {
                     if ui.add(unlock).clicked() {
                         self.unlock_open = true;
                     }
-                    ui.label(
-                        RichText::new(fill(
-                            t.free_limit,
-                            &[("n", &license::FREE_BATCH.to_string())],
-                        ))
-                        .small()
-                        .color(p.muted),
-                    );
+                }
+                if ui.button(t.refresh).clicked() {
+                    self.monitor.refresh();
                 }
             });
         });
     }
 
-    /// The empty state: one big target that says what the app wants.
-    fn drop_zone(&self, ui: &mut egui::Ui, p: Palette, hovering: bool) {
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, egui::Sense::hover());
-        let painter = ui.painter();
-        painter.rect_filled(
-            rect,
-            theme::CARD_RADIUS,
-            if hovering { p.accent_soft } else { p.surface },
-        );
-        painter.rect_stroke(
-            rect,
-            theme::CARD_RADIUS,
-            if hovering {
-                Stroke::new(2.0, p.accent)
-            } else {
-                Stroke::new(1.0, p.border)
-            },
-            StrokeKind::Inside,
-        );
-        let centre = rect.center();
-        // A down arrow in a soft disc: "put things here".
-        let disc = centre - egui::vec2(0.0, 44.0);
-        painter.circle_filled(disc, 30.0, if hovering { p.surface } else { p.accent_soft });
-        let arrow = Stroke::new(2.5, p.accent);
-        painter.line_segment([disc - egui::vec2(0.0, 12.0), disc + egui::vec2(0.0, 11.0)], arrow);
-        painter.line_segment([disc + egui::vec2(-9.0, 2.0), disc + egui::vec2(0.0, 11.5)], arrow);
-        painter.line_segment([disc + egui::vec2(9.0, 2.0), disc + egui::vec2(0.0, 11.5)], arrow);
-        painter.text(
-            centre + egui::vec2(0.0, 14.0),
-            Align2::CENTER_CENTER,
-            self.t.drop_here,
-            FontId::new(19.0, theme::semibold()),
-            p.text,
-        );
-        painter.text(
-            centre + egui::vec2(0.0, 46.0),
-            Align2::CENTER_CENTER,
-            FORMATS,
-            FontId::new(12.5, egui::FontFamily::Proportional),
-            p.muted,
-        );
-    }
-
-    fn list(&mut self, ui: &mut egui::Ui, p: Palette) {
+    /// One card per device that is low right now and gets warnings.
+    fn warnings(&self, ui: &mut egui::Ui, p: Palette, devices: &[Device]) {
         let t = self.t;
-        let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) && !self.busy();
-        if self.items.is_empty() {
-            self.drop_zone(ui, p, hovering);
-            return;
-        }
-        let mut remove = None;
-        let idle = !self.busy();
-        let mut frame = theme::card(p).inner_margin(egui::Margin::symmetric(0, 4));
-        if hovering {
-            frame = frame.stroke(Stroke::new(2.0, p.accent));
-        }
-        frame.show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
+        let low = devices::low_now(
+            devices,
+            self.settings.threshold,
+            self.settings.tray_device.as_deref(),
+            self.licensed_to.is_some(),
+        );
+        for (device, level) in low {
+            theme::card(p)
+                .stroke(Stroke::new(1.5, p.error))
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    let last = self.items.len() - 1;
-                    for (index, item) in self.items.iter().enumerate() {
-                        let width = ui.available_width();
-                        let row = ui.allocate_ui_with_layout(
-                            egui::vec2(width, ROW_HEIGHT),
-                            Layout::right_to_left(Align::Center),
-                            |ui| {
-                                ui.add_space(8.0);
-                                let close = egui::Button::new(RichText::new("✖").color(p.muted))
-                                    .frame(false);
-                                if ui
-                                    .add_enabled(idle, close)
-                                    .on_hover_text(t.remove_hint)
-                                    .clicked()
-                                {
-                                    remove = Some(index);
-                                }
-                                status_ui(ui, &item.status, p, t);
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add_space(14.0);
-                                    let extension = item
-                                        .path
-                                        .extension()
-                                        .map(|e| e.to_string_lossy().to_uppercase())
-                                        .unwrap_or_default();
-                                    theme::badge(ui, &extension, p.accent, p.accent_soft);
-                                    let name = item
-                                        .path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    ui.add(egui::Label::new(name).truncate())
-                                        .on_hover_text(item.path.display().to_string());
-                                });
-                            },
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(t.low_title)
+                                .family(theme::semibold())
+                                .color(p.error),
                         );
-                        if index != last {
-                            let line = row.response.rect;
-                            ui.painter().hline(
-                                (line.left() + 14.0)..=(line.right() - 14.0),
-                                line.bottom(),
-                                Stroke::new(1.0, p.border),
-                            );
-                        }
-                    }
+                        ui.label(fill(
+                            t.low_body,
+                            &[("name", &device.name), ("level", &level.to_string())],
+                        ));
+                    });
                 });
-        });
-        if let Some(index) = remove {
-            self.items.remove(index);
         }
     }
 
-    fn codec_help(&mut self, ui: &mut egui::Ui, p: Palette) {
-        let codecs = self.missing_codecs();
-        if codecs.is_empty() {
-            return;
-        }
+    fn device_card(&mut self, ui: &mut egui::Ui, p: Palette, device: &Device, in_tray: bool, now: u64) {
         let t = self.t;
-        theme::card(p)
-            .stroke(Stroke::new(1.0, p.warn))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for codec in codecs {
-                    ui.label(match codec {
-                        Codec::Heic => t.need_heic,
-                        Codec::Avif => t.need_avif,
-                        Codec::Jxl => t.need_jxl,
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        for (name, product, free) in codec.store_products() {
-                            let label =
-                                fill(if *free { t.get_free } else { t.get }, &[("name", name)]);
-                            if ui.button(label).clicked() {
-                                open(&format!("ms-windows-store://pdp/?ProductId={product}"));
-                            }
-                        }
-                    });
-                }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t.install_then).color(p.muted));
-                    if ui
-                        .add_enabled(!self.busy(), egui::Button::new(t.try_again))
-                        .clicked()
-                    {
-                        self.retry_failed();
+        let state = device.state();
+        let threshold = self.settings.threshold;
+        let low = |level: u8| level <= threshold;
+        theme::card(p).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                theme::badge(ui, kind_label(device.kind, t), p.accent, p.accent_soft);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // The number: live in full colour, remembered in grey.
+                    let number = match state {
+                        State::Live(level) => Some((level, if low(level) { p.error } else { p.text })),
+                        State::Off(Some((level, _))) => Some((level, p.muted)),
+                        _ => None,
+                    };
+                    if let Some((level, colour)) = number {
+                        ui.label(
+                            RichText::new(format!("{level}%"))
+                                .font(FontId::new(22.0, theme::semibold()))
+                                .color(colour),
+                        );
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&device.name)
+                                    .font(FontId::new(16.0, theme::semibold()))
+                                    .color(p.text),
+                            )
+                            .truncate(),
+                        );
+                    });
                 });
             });
-        ui.add_space(4.0);
+
+            match state {
+                State::Live(level) => {
+                    level_bar(ui, p, level, if low(level) { p.error } else { p.success });
+                }
+                State::Off(Some((level, _))) => level_bar(ui, p, level, p.muted),
+                _ => {}
+            }
+
+            ui.horizontal(|ui| {
+                // A small line: not the full height of a button row.
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if self.limited() {
+                        t.tray_choice_free
+                    } else {
+                        t.tray_choice
+                    };
+                    let label = RichText::new(label).small().color(p.muted);
+                    if ui.radio(in_tray, label).clicked() && !in_tray {
+                        self.settings.tray_device = Some(device.id.clone());
+                        self.save();
+                        self.share_settings();
+                        // A device that is already low warns straight away.
+                        self.monitor.refresh();
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        let colour = match state {
+                            State::Unreadable => p.warn,
+                            _ => p.muted,
+                        };
+                        let text = status_text(state, device.le, now, t);
+                        ui.add(egui::Label::new(RichText::new(&text).small().color(colour)).truncate())
+                            .on_hover_text(text);
+                    });
+                });
+            });
+        });
     }
 
-    fn options_card(&mut self, ui: &mut egui::Ui, p: Palette) {
-        let before = (
-            self.settings.format,
-            self.settings.quality,
-            self.settings.resize,
-            self.settings.max_edge,
-        );
+    fn list(&mut self, ui: &mut egui::Ui, p: Palette, devices: &[Device], polled: bool) {
+        let t = self.t;
+        if devices.is_empty() {
+            let rect = ui.available_rect_before_wrap();
+            ui.allocate_rect(rect, egui::Sense::hover());
+            ui.painter().rect_filled(rect, theme::CARD_RADIUS, p.surface);
+            ui.painter().rect_stroke(
+                rect,
+                theme::CARD_RADIUS,
+                Stroke::new(1.0, p.border),
+                egui::StrokeKind::Inside,
+            );
+            let text = if polled { t.no_devices } else { t.searching };
+            let galley = ui.painter().layout(
+                text.to_owned(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                p.muted,
+                (rect.width() - 48.0).max(100.0),
+            );
+            let corner = rect.center() - galley.size() / 2.0;
+            ui.painter().galley(corner, galley, p.muted);
+            return;
+        }
+        let now = monitor::now();
+        let chosen = self.settings.tray_device.as_deref();
+        let in_tray = devices::tray_device(devices, chosen).map(|d| d.id.clone());
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.warnings(ui, p, devices);
+                for device in devices {
+                    let chosen = in_tray.as_deref() == Some(device.id.as_str());
+                    self.device_card(ui, p, device, chosen, now);
+                }
+            });
+    }
+
+    fn settings_card(&mut self, ui: &mut egui::Ui, p: Palette) {
         let t = self.t;
         theme::card(p).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let right_edge = ui.max_rect().right();
-            ui.add_enabled_ui(!self.busy(), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t.convert_to).color(p.muted));
-                    // The three formats side by side: one click, no menu.
-                    for format in Format::ALL {
-                        let selected = self.settings.format == format;
-                        let text = RichText::new(self.format_label(format)).color(if selected {
-                            p.on_accent
-                        } else {
-                            p.text
-                        });
-                        let mut button = egui::Button::new(text);
-                        if selected {
-                            button = button.fill(p.accent).stroke(Stroke::NONE);
-                        }
-                        if ui.add(button).clicked() {
-                            self.settings.format = format;
-                        }
-                    }
-                    if self.settings.format == Format::Jpg {
-                        ui.add_space(6.0);
-                        // Long labels (Russian) leave less room: the slider
-                        // gives way so the row stays inside the card.
-                        let label_width = ui
-                            .painter()
-                            .layout_no_wrap(
-                                t.quality.to_owned(),
-                                egui::TextStyle::Body.resolve(ui.style()),
-                                p.muted,
-                            )
-                            .size()
-                            .x;
-                        ui.spacing_mut().slider_width =
-                            (right_edge - ui.cursor().left() - label_width - 84.0).clamp(70.0, 150.0);
-                        ui.add(
-                            egui::Slider::new(&mut self.settings.quality, 40..=100)
-                                .text(RichText::new(t.quality).color(p.muted)),
-                        );
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    theme::checkbox(ui, &mut self.settings.resize, t.shrink);
-                    ui.add_enabled(
-                        self.settings.resize,
-                        egui::DragValue::new(&mut self.settings.max_edge)
-                            .range(64..=20000)
-                            .speed(8)
-                            .suffix(" px"),
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(t.save_to).color(p.muted));
-                    let same = self.settings.out_dir.is_none();
-                    if ui.radio(same, t.same_folder).clicked() && !same {
-                        self.settings.out_dir = None;
-                        self.save();
-                    }
-                    let label = match &self.settings.out_dir {
-                        Some(dir) => dir.display().to_string(),
-                        None => t.another_folder.to_owned(),
-                    };
-                    if ui.radio(!same, label).clicked()
-                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.settings.out_dir = Some(dir);
-                        self.save();
-                    }
-                });
-            });
-        });
-        let after = (
-            self.settings.format,
-            self.settings.quality,
-            self.settings.resize,
-            self.settings.max_edge,
-        );
-        if before != after {
-            self.save();
-        }
-    }
-
-    fn action_row(&mut self, ui: &mut egui::Ui, p: Palette) {
-        let t = self.t;
-        ui.horizontal(|ui| {
-            let waiting = self.waiting();
-            let allowance = license::run_allowance(waiting, self.licensed_to.is_some());
-            let label = if self.busy() {
-                fill(t.converting_left, &[("n", &self.in_flight.to_string())])
-            } else if allowance < waiting {
-                fill(
-                    t.convert_next,
-                    &[("a", &allowance.to_string()), ("b", &waiting.to_string())],
-                )
-            } else if waiting == 0 {
-                t.convert.to_owned()
-            } else if waiting == 1 {
-                t.convert_one.to_owned()
-            } else {
-                fill(t.convert_n, &[("n", &waiting.to_string())])
-            };
-            let enabled = !self.busy() && waiting > 0;
-            if ui
-                .add_enabled(enabled, theme::primary_button(p, label, enabled))
-                .clicked()
-            {
-                self.start(ui.ctx());
-            }
-            if let Some(dir) = &self.last_output_dir
-                && ui.button(t.open_folder).clicked()
-            {
-                open(&dir.display().to_string());
-            }
-            let done = self
-                .items
-                .iter()
-                .filter(|i| matches!(i.status, Status::Done(_)))
-                .count();
-            if done > 0 {
-                ui.label(
-                    RichText::new(fill(t.n_converted, &[("n", &done.to_string())]))
-                        .color(p.success),
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(t.warn_at).color(p.muted));
+                let threshold = ui.add(
+                    egui::DragValue::new(&mut self.settings.threshold)
+                        .range(THRESHOLDS)
+                        .speed(0.2)
+                        .suffix("%"),
                 );
+                if threshold.changed() {
+                    self.save();
+                    self.share_settings();
+                }
+                // Once the value has settled, look again: a device may now
+                // be at or under the threshold.
+                if threshold.drag_stopped() || (threshold.changed() && !threshold.dragged()) {
+                    self.monitor.refresh();
+                }
+            });
+            if theme::checkbox(ui, &mut self.autostart, t.autostart).changed() {
+                autostart::set(self.autostart);
+                self.autostart = autostart::enabled();
+            }
+            if self.limited() {
+                ui.label(RichText::new(t.plan).small().color(p.muted));
             }
         });
-        if self.busy() && self.run_total > 0 {
-            let progress = (self.run_total - self.in_flight) as f32 / self.run_total as f32;
-            ui.add(
-                egui::ProgressBar::new(progress)
-                    .desired_height(4.0)
-                    .corner_radius(2)
-                    .fill(p.accent),
-            );
-        }
     }
 
     fn unlock_window(&mut self, ctx: &egui::Context, p: Palette) {
@@ -597,12 +395,10 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_width(400.0);
-                ui.label(fill(
-                    t.unlock_body,
-                    &[("n", &license::FREE_BATCH.to_string())],
-                ));
+                ui.label(t.plan);
                 ui.add_space(4.0);
-                if ui.add(theme::primary_button(p, t.buy, true)).clicked() {
+                let buy = fill(t.buy, &[("price", license::PRICE)]);
+                if ui.add(theme::primary_button(p, buy, true)).clicked() {
                     open(license::BUY_URL);
                 }
                 ui.add_space(10.0);
@@ -619,6 +415,9 @@ impl App {
                             self.save();
                             self.key_message = Some(fill(t.unlocked_thanks, &[("email", &email)]));
                             self.licensed_to = Some(email);
+                            // Every device gets warnings from now on.
+                            self.share_settings();
+                            self.monitor.refresh();
                         }
                         None => self.key_message = Some(t.bad_key.to_owned()),
                     }
@@ -673,83 +472,52 @@ impl App {
     }
 }
 
-/// The right-hand side of a file row: where that file has got to.
-fn status_ui(ui: &mut egui::Ui, status: &Status, p: Palette, t: &Strings) {
-    match status {
-        Status::Waiting => {
-            ui.label(RichText::new(t.waiting).color(p.muted));
-        }
-        Status::Converting => {
-            ui.label(RichText::new(t.converting).color(p.accent));
-            ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-        }
-        Status::Done(path) => {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            ui.add(egui::Label::new(RichText::new(name).color(p.success)).truncate())
-                .on_hover_text(path.display().to_string());
-            ui.label(RichText::new("✔").color(p.success));
-        }
-        Status::Failed(ConvertError::MissingCodec(_)) => {
-            ui.label(RichText::new(t.needs_extension).color(p.warn));
-        }
-        Status::Failed(ConvertError::Other(message)) => {
-            ui.label(RichText::new(short_error(message, t.cant_read)).color(p.error))
-                .on_hover_text(message);
-        }
+fn kind_label(kind: Kind, t: &Strings) -> &'static str {
+    match kind {
+        Kind::Headphones => t.kind_headphones,
+        Kind::Mouse => t.kind_mouse,
+        Kind::Keyboard => t.kind_keyboard,
+        Kind::Gamepad => t.kind_gamepad,
+        Kind::Other => t.kind_other,
     }
 }
 
-/// One line, short enough to sit beside the file name. Details from Windows
-/// and the decoders stay as they are; `fallback` covers a missing message.
-fn short_error(message: &str, fallback: &str) -> String {
-    let line = message.lines().next().unwrap_or("").trim();
-    let text = if line.is_empty() || line == PANIC_MESSAGE {
-        fallback
-    } else {
-        line
-    };
-    let mut short: String = text.chars().take(60).collect();
-    if text.chars().count() > 60 {
-        short.push('…');
-    }
-    short
-}
-
-fn spawn_workers(
-    jobs: VecDeque<(usize, PathBuf)>,
-    options: Options,
-    sender: Sender<JobResult>,
-    ctx: egui::Context,
-) {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .clamp(1, 8)
-        .min(jobs.len());
-    let jobs = Arc::new(Mutex::new(jobs));
-    for _ in 0..threads {
-        let (jobs, options, sender, ctx) =
-            (jobs.clone(), options.clone(), sender.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            loop {
-                let next = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
-                let Some((index, path)) = next else { break };
-                // A decoder panic must not leave the row stuck on "Converting".
-                let result = std::panic::catch_unwind(|| crate::convert::convert_file(&path, &options))
-                    .unwrap_or_else(|_| Err(ConvertError::Other(PANIC_MESSAGE.to_owned())));
-                if sender.send((index, result)).is_err() {
-                    break;
-                }
-                ctx.request_repaint();
-            }
-        });
+fn ago_text(ago: Ago, t: &Strings) -> String {
+    match ago {
+        Ago::Now => t.ago_now.to_owned(),
+        Ago::Minutes(n) => fill(t.ago_minutes, &[("n", &n.to_string())]),
+        Ago::Hours(n) => fill(t.ago_hours, &[("n", &n.to_string())]),
+        Ago::Days(n) => fill(t.ago_days, &[("n", &n.to_string())]),
     }
 }
 
-/// Opens a folder, web page or Store page with whatever Windows uses for it.
+/// The small line under a device: what is known, and nothing that is not.
+fn status_text(state: State, le: bool, now: u64, t: &Strings) -> String {
+    let transport = if le { "Bluetooth LE" } else { "Bluetooth" };
+    match state {
+        State::Live(_) => format!("{} · {transport}", t.connected),
+        State::NotReported => t.no_report.to_owned(),
+        State::Unreadable => t.unreadable.to_owned(),
+        State::Off(Some((level, seen))) => {
+            let when = ago_text(devices::ago(now, seen), t);
+            let last = fill(t.off_last, &[("level", &level.to_string()), ("when", &when)]);
+            format!("{} · {last}", t.off)
+        }
+        State::Off(None) => format!("{} · {}", t.off, t.never_seen),
+    }
+}
+
+/// A rounded bar filled to `level` percent.
+fn level_bar(ui: &mut egui::Ui, p: Palette, level: u8, colour: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 4, p.track);
+    let mut filled = rect;
+    // A sliver stays visible at 0-2% so the bar never looks absent.
+    filled.set_width((rect.width() * f32::from(level.min(100)) / 100.0).max(8.0));
+    ui.painter().rect_filled(filled, 4, colour);
+}
+
+/// Opens a web page with whatever Windows uses for it.
 fn open(target: &str) {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -768,22 +536,43 @@ fn open(target: &str) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui_root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.collect_results();
-        if !self.busy() {
-            let dropped: Vec<PathBuf> = ui_root.ctx().input(|input| {
-                input
-                    .raw
-                    .dropped_files
-                    .iter()
-                    .map(|file| file.path().to_path_buf())
-                    .collect()
-            });
-            if !dropped.is_empty() {
-                self.add_paths(&dropped);
+        let ctx = ui_root.ctx().clone();
+        // Closing the window hides it; Quit is in the tray menu.
+        if let Some(tray) = self.tray
+            && ctx.input(|input| input.viewport().close_requested())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            tray.hide_main();
+        }
+        // A tray start: the window was created off-screen. Once eframe has
+        // shown it, hide it and move it to where Open should bring it up.
+        if let (Some(tray), Some(frames)) = (self.tray, self.hide_in) {
+            if frames == 0 {
+                self.hide_in = None;
+                tray.hide_main();
+                let (monitor, size) = ctx.input(|input| {
+                    let viewport = input.viewport();
+                    (viewport.monitor_size, viewport.outer_rect.map(|r| r.size()))
+                });
+                let position = match (monitor, size) {
+                    (Some(monitor), Some(size)) => ((monitor - size) / 2.0).max(egui::Vec2::ZERO).to_pos2(),
+                    _ => egui::pos2(80.0, 80.0),
+                };
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+            } else {
+                self.hide_in = Some(frames - 1);
+                ctx.request_repaint();
             }
         }
+        // A copy, so the lock is not held while drawing.
+        let (devices, polled) = {
+            let shared = lock(&self.shared);
+            (shared.devices.clone(), shared.polled)
+        };
+        // Keeps "5 min ago" moving while the window is open.
+        ctx.request_repaint_after(std::time::Duration::from_secs(30));
 
-        let p = theme::palette(ui_root.ctx());
+        let p = theme::palette(&ctx);
         let bare = |top: i8, bottom: i8| {
             egui::Frame::new().fill(p.bg).inner_margin(egui::Margin {
                 left: GUTTER,
@@ -799,20 +588,14 @@ impl eframe::App for App {
         egui::Panel::bottom("controls")
             .frame(bare(10, 6))
             .show_separator_line(false)
-            .show(ui_root, |ui| {
-                self.codec_help(ui, p);
-                self.options_card(ui, p);
-                ui.add_space(4.0);
-                self.action_row(ui, p);
-            });
+            .show(ui_root, |ui| self.settings_card(ui, p));
         egui::Panel::top("toolbar")
             .frame(bare(14, 10))
             .show_separator_line(false)
             .show(ui_root, |ui| self.toolbar(ui, p));
         egui::CentralPanel::default()
             .frame(bare(0, 0))
-            .show(ui_root, |ui| self.list(ui, p));
-        let ctx = ui_root.ctx().clone();
+            .show(ui_root, |ui| self.list(ui, p, &devices, polled));
         self.unlock_window(&ctx, p);
     }
 }
@@ -822,11 +605,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_error_is_one_trimmed_line() {
-        assert_eq!(short_error("  bad header\nmore", "fallback"), "bad header");
-        assert_eq!(short_error("", "fallback"), "fallback");
-        assert_eq!(short_error(PANIC_MESSAGE, "fallback"), "fallback");
-        let long = "x".repeat(100);
-        assert_eq!(short_error(&long, "fallback").chars().count(), 61);
+    fn status_says_what_is_known_and_never_guesses() {
+        let t = Lang::En.strings();
+        assert_eq!(status_text(State::Live(80), true, 0, t), "Connected · Bluetooth LE");
+        assert_eq!(status_text(State::Live(80), false, 0, t), "Connected · Bluetooth");
+        assert_eq!(
+            status_text(State::NotReported, false, 0, t),
+            "This device does not report its battery level"
+        );
+        assert_eq!(status_text(State::Unreadable, true, 0, t), "Couldn't read the battery level");
+        assert_eq!(
+            status_text(State::Off(Some((64, 1000))), false, 1000 + 2 * 3600 + 5, t),
+            "Off or out of range · last seen at 64%, 2 h ago"
+        );
+        assert_eq!(
+            status_text(State::Off(None), false, 0, t),
+            "Off or out of range · no battery level seen yet"
+        );
+    }
+
+    #[test]
+    fn times_are_worded_in_every_unit() {
+        let t = Lang::En.strings();
+        assert_eq!(ago_text(Ago::Now, t), "just now");
+        assert_eq!(ago_text(Ago::Minutes(5), t), "5 min ago");
+        assert_eq!(ago_text(Ago::Hours(3), t), "3 h ago");
+        assert_eq!(ago_text(Ago::Days(2), t), "2 d ago");
+    }
+
+    #[test]
+    fn every_kind_has_a_label_in_every_language() {
+        for lang in Lang::ALL {
+            let t = lang.strings();
+            let labels: Vec<&str> = [Kind::Headphones, Kind::Mouse, Kind::Keyboard, Kind::Gamepad, Kind::Other]
+                .into_iter()
+                .map(|kind| kind_label(kind, t))
+                .collect();
+            let mut unique = labels.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(unique.len(), labels.len(), "{lang:?}: {labels:?}");
+        }
     }
 }

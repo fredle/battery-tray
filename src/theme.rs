@@ -11,7 +11,7 @@ use eframe::egui::{
 
 use crate::i18n::Lang;
 
-/// Corner radius of cards and the drop zone.
+/// Corner radius of cards.
 pub const CARD_RADIUS: u8 = 12;
 /// Corner radius of buttons and inputs.
 pub const CONTROL_RADIUS: u8 = 8;
@@ -26,7 +26,7 @@ pub fn semibold() -> FontFamily {
 pub struct Palette {
     /// Window background.
     pub bg: Color32,
-    /// Cards, inputs and the drop zone.
+    /// Cards and inputs.
     pub surface: Color32,
     pub border: Color32,
     pub text: Color32,
@@ -34,7 +34,7 @@ pub struct Palette {
     pub accent: Color32,
     /// Text on an accent fill.
     pub on_accent: Color32,
-    /// Accent at low strength, for badges and the drop zone highlight.
+    /// Accent at low strength, for badges.
     pub accent_soft: Color32,
     /// Resting fill of secondary buttons.
     pub control: Color32,
@@ -165,7 +165,7 @@ pub fn apply(ctx: &egui::Context) {
 
 /// Uses Windows' Segoe UI for the interface, so the app looks at home, and
 /// adds Windows' East Asian fonts for the display language and Windows'
-/// language (so file names in the user's script show too). egui's built-in
+/// language (so device names in the user's script show too). egui's built-in
 /// fonts stay as the fallback and supply the symbols.
 pub fn install_fonts(ctx: &egui::Context, languages: &[Lang]) {
     let fonts_dir = PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()))
@@ -200,7 +200,7 @@ pub fn install_fonts(ctx: &egui::Context, languages: &[Lang]) {
         strong.insert(0, "seguisb.ttf".to_owned());
     }
     for lang in languages {
-        // The shift puts mixed text ("3枚", "IMG_1.jpg") on one baseline:
+        // The shift puts mixed text ("残量 82%") on one baseline:
         // some of these fonts sit higher on the line than the Latin font.
         let found = lang
             .system_fonts()
@@ -246,7 +246,7 @@ pub fn primary_button<'a>(p: Palette, text: impl Into<String>, enabled: bool) ->
         .min_size(Vec2::new(230.0, 40.0))
 }
 
-/// A small rounded label, such as a file's format. Painted at its own size,
+/// A small rounded label, such as a device's kind. Painted at its own size,
 /// so it stays compact whatever the height of the row it sits in.
 pub fn badge(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
     let galley = ui

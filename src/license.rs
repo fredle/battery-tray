@@ -9,12 +9,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Where "Buy" sends people. While this is empty the app has no paid tier
-/// at all: the limit is off, so a build can never ship a paywall that
+/// at all: every device gets warnings, so a build can never ship a paywall that
 /// nobody can pay.
 pub const BUY_URL: &str = "https://battery.leatham.net/buy";
 
-/// Files converted per run without a licence.
-pub const FREE_BATCH: usize = 3;
+/// What the unlock costs, for the Buy button.
+pub const PRICE: &str = "£2.99";
 
 /// Public half of the licence server's signing key (base64url, 32 bytes).
 const PUBLIC_KEY: &str = "o3lBokDFPWGWAa_lv5C6p3hpGni7FrnTwCNP13rk0fc";
@@ -47,13 +47,11 @@ fn verify_with(public_key: &[u8; 32], key: &str) -> Option<String> {
     String::from_utf8(email).ok()
 }
 
-/// How many of `pending` files a run may convert.
-pub fn run_allowance(pending: usize, licensed: bool) -> usize {
-    if licensed || !paid_tier_enabled() {
-        pending
-    } else {
-        pending.min(FREE_BATCH)
-    }
+/// Whether a low-battery warning is shown for `device`. Free: only for the
+/// one device the tray icon shows. Unlocked: for every device. Levels
+/// themselves are never limited.
+pub fn warns_about(device: &str, tray_device: Option<&str>, licensed: bool) -> bool {
+    licensed || !paid_tier_enabled() || tray_device == Some(device)
 }
 
 #[cfg(test)]
@@ -125,10 +123,13 @@ mod tests {
     }
 
     #[test]
-    fn allowance_only_limits_when_a_paid_tier_exists() {
-        assert_eq!(run_allowance(10, true), 10);
-        let expected = if paid_tier_enabled() { FREE_BATCH } else { 10 };
-        assert_eq!(run_allowance(10, false), expected);
-        assert_eq!(run_allowance(2, false), 2);
+    fn free_warns_about_one_device_and_the_unlock_about_all() {
+        assert!(warns_about("a", Some("a"), false));
+        assert!(warns_about("b", Some("a"), true));
+        assert!(warns_about("b", None, true));
+        // Without a way to buy, nothing is held back.
+        let free_gets_all = !paid_tier_enabled();
+        assert_eq!(warns_about("b", Some("a"), false), free_gets_all);
+        assert_eq!(warns_about("b", None, false), free_gets_all);
     }
 }

@@ -6,13 +6,18 @@
 #![windows_subsystem = "windows"]
 
 mod app;
-mod convert;
+mod autostart;
+mod bluetooth;
+mod devices;
 mod i18n;
+mod icon;
 mod license;
+mod monitor;
 mod settings;
+mod source;
 mod theme;
+mod tray;
 mod update;
-mod wic;
 
 fn main() {
     // First thing, always: Velopack may need to run an install/uninstall/
