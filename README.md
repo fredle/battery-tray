@@ -1,9 +1,9 @@
-# Battery Tray
+# Bluetooth Battery Tray
 
 Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with low warnings.
 
 Windows keeps the battery level of Bluetooth devices several clicks deep in
-Settings and says nothing when one is about to run out. Battery Tray draws the
+Settings and says nothing when one is about to run out. Bluetooth Battery Tray draws the
 percentage of one device into a tray icon, lists every device in the tooltip,
 and warns when a battery falls to the level you set.
 
@@ -68,7 +68,7 @@ The tray menu uses the same language. The licence server's pages
 
 ## Install
 
-- Microsoft Store: search for "Battery Tray".
+- Microsoft Store: search for "Bluetooth Battery Tray".
 - Or download the installer from
   [GitHub Releases](https://github.com/fredle/battery-tray/releases).
 

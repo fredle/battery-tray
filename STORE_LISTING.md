@@ -5,7 +5,7 @@ which also has the other 13 languages.
 
 ## Product name
 
-Battery Tray
+Bluetooth Battery Tray
 
 ## Short description
 
@@ -15,7 +15,7 @@ See the battery level of your Bluetooth headphones, mouse and keyboard in the tr
 
 Windows keeps the battery level of your Bluetooth devices several clicks deep in Settings, and says nothing when one is about to run out. You find out when the mouse stops or the headphones go quiet in the middle of a call.
 
-Battery Tray puts the number in the system tray. Pick a device and its battery percentage is drawn right into the tray icon. Hover over the icon to see every paired device, and get a warning when a battery falls to the level you set.
+Bluetooth Battery Tray puts the number in the system tray. Pick a device and its battery percentage is drawn right into the tray icon. Hover over the icon to see every paired device, and get a warning when a battery falls to the level you set.
 
 The battery level of every device is free, with no trial that runs out. The tray icon and the low-battery warning are free for one device you choose. An optional one-off unlock (£2.99, bought on our website) adds low-battery warnings for every device.
 
@@ -30,7 +30,7 @@ Useful details:
 - Closing the window keeps the app in the tray. Starting with Windows is one tick.
 - Checks about once a minute in the background, so the window never freezes.
 
-About accuracy: the number comes from the device itself, through Windows. Some headphones only report in steps of 10 or 20, and a few report nothing at all. Battery Tray shows exactly what the device reports.
+About accuracy: the number comes from the device itself, through Windows. Some headphones only report in steps of 10 or 20, and a few report nothing at all. Bluetooth Battery Tray shows exactly what the device reports.
 
 No account, no ads, no telemetry.
 
@@ -85,5 +85,5 @@ user can turn off. No device names, addresses or usage data are sent anywhere.
 ## Screenshots
 
 1. The device list. Caption: "Every Bluetooth battery in one place" / "Headphones, mouse, keyboard and controller, each with its level. Devices that are off show their last level and when."
-2. A low-battery warning. Caption: "A warning before it runs out" / "Set the level once. Battery Tray warns you when a device falls to it, once per discharge."
+2. A low-battery warning. Caption: "A warning before it runs out" / "Set the level once. Bluetooth Battery Tray warns you when a device falls to it, once per discharge."
 3. The tray icon and its menu. Caption: "The number, right in the tray" / "The tray icon shows one device's percentage. Hover or right-click to see all of them."

@@ -1,4 +1,4 @@
-# Battery Tray
+# Bluetooth Battery Tray
 
 Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with low warnings.
 

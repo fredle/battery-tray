@@ -152,7 +152,7 @@ unsafe fn create_window() -> Option<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
-            w!("Battery Tray"),
+            w!("Bluetooth Battery Tray"),
             WINDOW_STYLE(0),
             0,
             0,

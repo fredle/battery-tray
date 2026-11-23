@@ -1,6 +1,6 @@
-# Battery Tray server
+# Bluetooth Battery Tray server
 
-The backend for Battery Tray: Node 24 running TypeScript directly (type
+The backend for Bluetooth Battery Tray: Node 24 running TypeScript directly (type
 stripping, so no enums, namespaces or parameter properties) with no build step.
 
 - `npm install`, then `npm test` and `npx tsc` (type check only).
