@@ -1,6 +1,6 @@
 [package]
 name = "battery_tray"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with low warnings."
 repository = "https://github.com/fredle/battery-tray"
