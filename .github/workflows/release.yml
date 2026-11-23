@@ -87,7 +87,6 @@ jobs:
 
           vpk pack `
             -u BatteryTray `
-            --packTitle "Bluetooth Battery Tray" `
             -v $version `
             -p target\publish `
             -e battery_tray.exe `
