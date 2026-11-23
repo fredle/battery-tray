@@ -1,4 +1,4 @@
-//! Bluetooth Battery Tray - Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with low warnings.
+//! Battery Tray - Battery level of your Bluetooth headphones, mouse and keyboard in the tray, with low warnings.
 //!
 //!   battery_tray.exe                 open the app
 //!   battery_tray.exe --auto-update   internal: background update check/download

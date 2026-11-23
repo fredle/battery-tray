@@ -20,7 +20,7 @@ use crate::tray::{self, Tray};
 
 const WIDTH: f32 = 560.0;
 const HEIGHT: f32 = 720.0;
-const APP_NAME: &str = "Bluetooth Battery Tray";
+const APP_NAME: &str = "Battery Tray";
 /// Space between the window edge and its contents.
 const GUTTER: i8 = 16;
 /// Where the window is created when the app starts in the tray.
