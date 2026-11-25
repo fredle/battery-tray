@@ -61,6 +61,8 @@ pub fn run(args: Vec<String>) -> eframe::Result<()> {
 pub struct App {
     settings: crate::settings::Settings,
     version: String,
+    /// "What would make this better?" (src/feedback.rs).
+    feedback: crate::feedback::Feedback,
     shared: SharedState,
     monitor: Monitor,
     /// `None` if the tray icon could not be created; closing then quits.
@@ -130,6 +132,7 @@ impl App {
             t: lang.strings(),
             settings,
             version: crate::update::current_version(),
+            feedback: { let mut f = crate::feedback::Feedback::default(); f.set_texts(lang.feedback_texts()); f },
             shared,
             monitor,
             tray,
@@ -161,6 +164,7 @@ impl App {
     }
 
     fn set_language(&mut self, lang: Lang, ctx: &egui::Context) {
+        self.feedback.set_texts(lang.feedback_texts());
         self.lang = lang;
         self.t = lang.strings();
         self.key_message = None;
@@ -454,6 +458,8 @@ impl App {
                         .small()
                         .color(p.muted),
                 );
+                ui.add_space(8.0);
+                self.feedback.link(ui);
                 let mut chosen = self.lang;
                 egui::ComboBox::from_id_salt("language")
                     .selected_text(RichText::new(self.lang.name()).small())
@@ -597,6 +603,8 @@ impl eframe::App for App {
             .frame(bare(0, 0))
             .show(ui_root, |ui| self.list(ui, p, &devices, polled));
         self.unlock_window(&ctx, p);
+            let feedback_ctx = ui_root.ctx().clone();
+        self.feedback.show(&feedback_ctx, &self.version, false);
     }
 }
 

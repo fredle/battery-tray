@@ -82,6 +82,8 @@ Nothing else is kept.
 Network: a version check against GitHub Releases about once a day, which the
 user can turn off. No device names, addresses or usage data are sent anywhere.
 
+Feedback: the "What would make this better?" link in the window lets you send the developer a short note. Only the note, the app's name and version, and the platform are sent, to the developer's server at feedback.leatham.net, and only when you press Send. No name, email address or device identifier is sent, and the server does not keep IP addresses. Notes are used only to improve the app and are never shared or sold.
+
 ## Screenshots
 
 1. The device list. Caption: "Every Bluetooth battery in one place" / "Headphones, mouse, keyboard and controller, each with its level. Devices that are off show their last level and when."
