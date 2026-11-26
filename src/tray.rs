@@ -28,7 +28,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::devices;
-use crate::i18n::fill;
 use crate::icon;
 use crate::monitor::{SharedState, lock};
 
@@ -231,7 +230,7 @@ fn update(window: HWND, add: bool) {
         let chosen = shared.tray_device.as_deref();
         let level = devices::tray_device(&shared.devices, chosen).and_then(|d| d.live_level());
         let low = level.is_some_and(|level| level <= shared.threshold);
-        let tip = devices::tooltip(&shared.devices, t.off_short, t.tray_none);
+        let tip = devices::tooltip(&shared.devices, t);
         (level, low, tip, std::mem::take(&mut shared.pending), t)
     };
 
@@ -263,7 +262,7 @@ fn update(window: HWND, add: bool) {
     if !warnings.is_empty() && std::env::var_os(QUIET_ENV).is_none() {
         let body = warnings
             .iter()
-            .map(|w| fill(t.low_body, &[("name", &w.name), ("level", &w.level.to_string())]))
+            .map(|w| devices::fill_level(t.low_body, w.level, w.precision, t, &[("name", &w.name)]))
             .collect::<Vec<_>>()
             .join("\n");
         let mut data = icon_data(window);
@@ -292,7 +291,7 @@ fn menu(window: HWND) {
         let lines: Vec<String> = shared
             .devices
             .iter()
-            .map(|d| devices::summary_line(d, t.off_short))
+            .map(|d| devices::summary_line(d, t))
             .collect();
         Some((lines, t.tray_open, t.tray_quit, state.main_window, state.ctx.clone()))
     }) else {

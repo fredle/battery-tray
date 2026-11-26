@@ -109,7 +109,7 @@ impl Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::devices::{Battery, Kind, Reading, State};
+    use crate::devices::{Battery, Kind, Reading, State, Transport};
 
     struct Script(Vec<Option<Vec<Reading>>>);
 
@@ -121,12 +121,8 @@ mod tests {
 
     fn mouse(level: u8) -> Option<Vec<Reading>> {
         Some(vec![Reading {
-            id: "m".into(),
-            name: "Mouse".into(),
-            kind: Kind::Mouse,
-            le: true,
-            connected: true,
             battery: Battery::Level(level),
+            ..Reading::new("m", "Mouse", Kind::Mouse, Transport::Le)
         }])
     }
 

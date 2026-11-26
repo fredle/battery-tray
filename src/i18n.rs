@@ -223,6 +223,25 @@ strings! {
     tray_none,
     /// A device that is off, in the tooltip: "Mouse: off".
     off_short,
+    /// The PC's own battery, as a device kind.
+    kind_laptop,
+    /// After a level: "80% (charging)".
+    charging,
+    /// Left earbud, as short as possible: "L 80%".
+    part_left,
+    /// Right earbud: "R 70%".
+    part_right,
+    /// The charging case: "Case 40%".
+    part_case,
+    /// A wireless USB receiver (Logitech, Xbox Wireless Adapter).
+    transport_receiver,
+    /// Where the laptop battery is.
+    transport_internal,
+    /// Battery bands for devices that report no percentage.
+    level_full,
+    level_medium,
+    level_low,
+    level_very_low,
 }
 
 static EN: Strings = Strings {
@@ -267,6 +286,17 @@ static EN: Strings = Strings {
     tray_quit: "Quit",
     tray_none: "No Bluetooth devices",
     off_short: "off",
+    kind_laptop: "Laptop",
+    charging: "charging",
+    part_left: "L",
+    part_right: "R",
+    part_case: "Case",
+    transport_receiver: "USB receiver",
+    transport_internal: "This PC",
+    level_full: "Full",
+    level_medium: "Medium",
+    level_low: "Low",
+    level_very_low: "Very low",
 };
 
 static DE: Strings = Strings {
@@ -311,6 +341,17 @@ static DE: Strings = Strings {
     tray_quit: "Beenden",
     tray_none: "Keine Bluetooth-Geräte",
     off_short: "aus",
+    kind_laptop: "Laptop",
+    charging: "lädt",
+    part_left: "L",
+    part_right: "R",
+    part_case: "Etui",
+    transport_receiver: "USB-Empfänger",
+    transport_internal: "Dieser PC",
+    level_full: "Voll",
+    level_medium: "Mittel",
+    level_low: "Niedrig",
+    level_very_low: "Sehr niedrig",
 };
 
 static FR: Strings = Strings {
@@ -355,6 +396,17 @@ static FR: Strings = Strings {
     tray_quit: "Quitter",
     tray_none: "Aucun appareil Bluetooth",
     off_short: "éteint",
+    kind_laptop: "PC portable",
+    charging: "en charge",
+    part_left: "G",
+    part_right: "D",
+    part_case: "Boîtier",
+    transport_receiver: "Récepteur USB",
+    transport_internal: "Ce PC",
+    level_full: "Pleine",
+    level_medium: "Moyenne",
+    level_low: "Faible",
+    level_very_low: "Très faible",
 };
 
 static ES: Strings = Strings {
@@ -399,6 +451,17 @@ static ES: Strings = Strings {
     tray_quit: "Salir",
     tray_none: "No hay dispositivos Bluetooth",
     off_short: "apagado",
+    kind_laptop: "Portátil",
+    charging: "cargando",
+    part_left: "I",
+    part_right: "D",
+    part_case: "Estuche",
+    transport_receiver: "Receptor USB",
+    transport_internal: "Este equipo",
+    level_full: "Llena",
+    level_medium: "Media",
+    level_low: "Baja",
+    level_very_low: "Muy baja",
 };
 
 static IT: Strings = Strings {
@@ -443,6 +506,17 @@ static IT: Strings = Strings {
     tray_quit: "Esci",
     tray_none: "Nessun dispositivo Bluetooth",
     off_short: "spento",
+    kind_laptop: "Portatile",
+    charging: "in carica",
+    part_left: "S",
+    part_right: "D",
+    part_case: "Custodia",
+    transport_receiver: "Ricevitore USB",
+    transport_internal: "Questo PC",
+    level_full: "Piena",
+    level_medium: "Media",
+    level_low: "Bassa",
+    level_very_low: "Molto bassa",
 };
 
 static PT: Strings = Strings {
@@ -487,6 +561,17 @@ static PT: Strings = Strings {
     tray_quit: "Sair",
     tray_none: "Nenhum dispositivo Bluetooth",
     off_short: "desligado",
+    kind_laptop: "Notebook",
+    charging: "carregando",
+    part_left: "E",
+    part_right: "D",
+    part_case: "Estojo",
+    transport_receiver: "Receptor USB",
+    transport_internal: "Este computador",
+    level_full: "Cheia",
+    level_medium: "Média",
+    level_low: "Baixa",
+    level_very_low: "Muito baixa",
 };
 
 static NL: Strings = Strings {
@@ -531,6 +616,17 @@ static NL: Strings = Strings {
     tray_quit: "Afsluiten",
     tray_none: "Geen Bluetooth-apparaten",
     off_short: "uit",
+    kind_laptop: "Laptop",
+    charging: "laadt op",
+    part_left: "L",
+    part_right: "R",
+    part_case: "Case",
+    transport_receiver: "USB-ontvanger",
+    transport_internal: "Deze pc",
+    level_full: "Vol",
+    level_medium: "Gemiddeld",
+    level_low: "Laag",
+    level_very_low: "Zeer laag",
 };
 
 static PL: Strings = Strings {
@@ -575,6 +671,17 @@ static PL: Strings = Strings {
     tray_quit: "Zakończ",
     tray_none: "Brak urządzeń Bluetooth",
     off_short: "wyłączone",
+    kind_laptop: "Laptop",
+    charging: "ładowanie",
+    part_left: "L",
+    part_right: "P",
+    part_case: "Etui",
+    transport_receiver: "Odbiornik USB",
+    transport_internal: "Ten komputer",
+    level_full: "Pełna",
+    level_medium: "Średnia",
+    level_low: "Niska",
+    level_very_low: "Bardzo niska",
 };
 
 static TR: Strings = Strings {
@@ -619,6 +726,17 @@ static TR: Strings = Strings {
     tray_quit: "Çıkış",
     tray_none: "Bluetooth cihazı yok",
     off_short: "kapalı",
+    kind_laptop: "Dizüstü",
+    charging: "şarj oluyor",
+    part_left: "Sol",
+    part_right: "Sağ",
+    part_case: "Kutu",
+    transport_receiver: "USB alıcı",
+    transport_internal: "Bu bilgisayar",
+    level_full: "Dolu",
+    level_medium: "Orta",
+    level_low: "Düşük",
+    level_very_low: "Çok düşük",
 };
 
 static RU: Strings = Strings {
@@ -663,6 +781,17 @@ static RU: Strings = Strings {
     tray_quit: "Выход",
     tray_none: "Нет устройств Bluetooth",
     off_short: "выкл.",
+    kind_laptop: "Ноутбук",
+    charging: "заряжается",
+    part_left: "Л",
+    part_right: "П",
+    part_case: "Кейс",
+    transport_receiver: "USB-приёмник",
+    transport_internal: "Этот компьютер",
+    level_full: "Полный",
+    level_medium: "Средний",
+    level_low: "Низкий",
+    level_very_low: "Очень низкий",
 };
 
 static JA: Strings = Strings {
@@ -707,6 +836,17 @@ static JA: Strings = Strings {
     tray_quit: "終了",
     tray_none: "Bluetooth デバイスなし",
     off_short: "オフ",
+    kind_laptop: "ノートPC",
+    charging: "充電中",
+    part_left: "左",
+    part_right: "右",
+    part_case: "ケース",
+    transport_receiver: "USBレシーバー",
+    transport_internal: "このPC",
+    level_full: "満充電",
+    level_medium: "中",
+    level_low: "低",
+    level_very_low: "非常に低い",
 };
 
 static KO: Strings = Strings {
@@ -751,6 +891,17 @@ static KO: Strings = Strings {
     tray_quit: "종료",
     tray_none: "Bluetooth 장치 없음",
     off_short: "꺼짐",
+    kind_laptop: "노트북",
+    charging: "충전 중",
+    part_left: "좌",
+    part_right: "우",
+    part_case: "케이스",
+    transport_receiver: "USB 수신기",
+    transport_internal: "이 PC",
+    level_full: "가득",
+    level_medium: "보통",
+    level_low: "낮음",
+    level_very_low: "매우 낮음",
 };
 
 static ZH_HANS: Strings = Strings {
@@ -795,6 +946,17 @@ static ZH_HANS: Strings = Strings {
     tray_quit: "退出",
     tray_none: "没有蓝牙设备",
     off_short: "已关闭",
+    kind_laptop: "笔记本电脑",
+    charging: "充电中",
+    part_left: "左",
+    part_right: "右",
+    part_case: "充电盒",
+    transport_receiver: "USB 接收器",
+    transport_internal: "此电脑",
+    level_full: "满",
+    level_medium: "中",
+    level_low: "低",
+    level_very_low: "极低",
 };
 
 static ZH_HANT: Strings = Strings {
@@ -839,6 +1001,17 @@ static ZH_HANT: Strings = Strings {
     tray_quit: "結束",
     tray_none: "沒有藍牙裝置",
     off_short: "已關閉",
+    kind_laptop: "筆記型電腦",
+    charging: "充電中",
+    part_left: "左",
+    part_right: "右",
+    part_case: "充電盒",
+    transport_receiver: "USB 接收器",
+    transport_internal: "本機",
+    level_full: "滿",
+    level_medium: "中",
+    level_low: "低",
+    level_very_low: "極低",
 };
 
 #[cfg(test)]

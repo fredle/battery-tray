@@ -18,8 +18,10 @@
 //! would make Windows try to connect and block for seconds. Nothing here
 //! pairs, connects or changes a device.
 //!
-//! This module could not be tested against real hardware where it was
-//! written; `source.rs` has a simulated source for everything above it.
+//! The vendor and product ID in each node's instance ID is passed on, so
+//! `airpods.rs` can tell which paired device is which AirPods model.
+//!
+//! `source.rs` has a simulated source for everything above this module.
 
 use std::collections::HashMap;
 
@@ -41,7 +43,7 @@ use windows::Win32::Foundation::DEVPROPKEY;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::core::{GUID, HSTRING, PCWSTR, Result};
 
-use crate::devices::{self, Battery, Kind, Reading};
+use crate::devices::{self, Battery, Kind, Reading, Transport};
 use crate::source::Source;
 
 /// The battery percentage Windows' Bluetooth stack keeps on a device node.
@@ -58,10 +60,10 @@ impl Source for Windows {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let node_levels = node_levels();
-        let mut readings = low_energy(&node_levels).ok()?;
+        let nodes = nodes();
+        let mut readings = low_energy(&nodes).ok()?;
         // A dual-mode device is paired both ways; keep the one with a level.
-        for classic in classic(&node_levels).ok()? {
+        for classic in classic(&nodes).ok()? {
             match readings.iter_mut().find(|r| r.id == classic.id) {
                 Some(existing) => {
                     if !matches!(existing.battery, Battery::Level(_)) {
@@ -80,7 +82,7 @@ fn paired(selector: &HSTRING) -> Result<Vec<HSTRING>> {
     (0..found.Size()?).map(|i| found.GetAt(i)?.Id()).collect()
 }
 
-fn classic(node_levels: &HashMap<String, u8>) -> Result<Vec<Reading>> {
+fn classic(nodes: &Nodes) -> Result<Vec<Reading>> {
     let mut readings = Vec::new();
     for id in paired(&BluetoothDevice::GetDeviceSelectorFromPairingState(true)?)? {
         // One device that cannot be opened must not hide the others.
@@ -90,21 +92,24 @@ fn classic(node_levels: &HashMap<String, u8>) -> Result<Vec<Reading>> {
         let address = devices::address_id(device.BluetoothAddress()?);
         let connected = device.ConnectionStatus()? == BluetoothConnectionStatus::Connected;
         readings.push(Reading {
-            name: device.Name()?.to_string(),
-            kind: Kind::from_class_of_device(device.ClassOfDevice()?.RawValue()?),
-            le: false,
             connected,
-            battery: match node_levels.get(&address) {
+            battery: match nodes.levels.get(&address) {
                 Some(level) => Battery::Level(*level),
                 None => Battery::NotReported,
             },
-            id: address,
+            hardware: nodes.hardware.get(&address).copied(),
+            ..Reading::new(
+                address.clone(),
+                device.Name()?.to_string(),
+                Kind::from_class_of_device(device.ClassOfDevice()?.RawValue()?),
+                Transport::Bluetooth,
+            )
         });
     }
     Ok(readings)
 }
 
-fn low_energy(node_levels: &HashMap<String, u8>) -> Result<Vec<Reading>> {
+fn low_energy(nodes: &Nodes) -> Result<Vec<Reading>> {
     let mut readings = Vec::new();
     for id in paired(&BluetoothLEDevice::GetDeviceSelectorFromPairingState(true)?)? {
         let Ok(device) = BluetoothLEDevice::FromIdAsync(&id).and_then(|op| op.join()) else {
@@ -115,7 +120,7 @@ fn low_energy(node_levels: &HashMap<String, u8>) -> Result<Vec<Reading>> {
         let battery = if connected {
             match gatt_level(&device) {
                 Ok(Some(level)) => Battery::Level(level),
-                other => match (node_levels.get(&address), other) {
+                other => match (nodes.levels.get(&address), other) {
                     (Some(level), _) => Battery::Level(*level),
                     (None, Ok(None)) => Battery::NotReported,
                     (None, _) => Battery::Unreadable,
@@ -125,12 +130,15 @@ fn low_energy(node_levels: &HashMap<String, u8>) -> Result<Vec<Reading>> {
             Battery::Unreadable
         };
         readings.push(Reading {
-            name: device.Name()?.to_string(),
-            kind: Kind::from_appearance(device.Appearance()?.RawValue()?),
-            le: true,
             connected,
             battery,
-            id: address,
+            hardware: nodes.hardware.get(&address).copied(),
+            ..Reading::new(
+                address.clone(),
+                device.Name()?.to_string(),
+                Kind::from_appearance(device.Appearance()?.RawValue()?),
+                Transport::Le,
+            )
         });
     }
     Ok(readings)
@@ -183,21 +191,31 @@ fn gatt_level(device: &BluetoothLEDevice) -> Result<Option<u8>> {
     Ok(Some(level.min(100)))
 }
 
-/// Battery levels Windows holds on present Bluetooth device nodes, by
-/// Bluetooth address.
-fn node_levels() -> HashMap<String, u8> {
-    let mut levels = HashMap::new();
+/// What Windows holds on present Bluetooth device nodes, by address.
+#[derive(Default)]
+struct Nodes {
+    /// The battery level Windows' Bluetooth stack read.
+    levels: HashMap<String, u8>,
+    /// Vendor and product ID, from the node's instance ID.
+    hardware: HashMap<String, (u16, u16)>,
+}
+
+fn nodes() -> Nodes {
+    let mut nodes = Nodes::default();
     for enumerator in ["BTHENUM", "BTHLE"] {
         for instance_id in instance_ids(enumerator) {
             let Some(address) = devices::address_in_instance_id(&instance_id) else {
                 continue;
             };
+            if let Some(hardware) = devices::hardware_in_instance_id(&instance_id) {
+                nodes.hardware.entry(address.clone()).or_insert(hardware);
+            }
             if let Some(level) = node_level(&instance_id) {
-                levels.entry(address).or_insert(level);
+                nodes.levels.entry(address).or_insert(level);
             }
         }
     }
-    levels
+    nodes
 }
 
 /// Instance IDs of the devices currently present under one enumerator.

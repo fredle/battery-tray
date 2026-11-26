@@ -5,8 +5,11 @@
 
 #![windows_subsystem = "windows"]
 
+mod airpods;
 mod app;
 mod feedback;
+mod hid;
+mod hidpp;
 mod autostart;
 mod bluetooth;
 mod devices;
@@ -14,11 +17,14 @@ mod i18n;
 mod icon;
 mod license;
 mod monitor;
+mod power;
 mod settings;
+mod sony;
 mod source;
 mod theme;
 mod tray;
 mod update;
+mod xinput;
 
 fn main() {
     // First thing, always: Velopack may need to run an install/uninstall/

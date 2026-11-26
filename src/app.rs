@@ -228,9 +228,12 @@ impl App {
                                 .family(theme::semibold())
                                 .color(p.error),
                         );
-                        ui.label(fill(
+                        ui.label(devices::fill_level(
                             t.low_body,
-                            &[("name", &device.name), ("level", &level.to_string())],
+                            level,
+                            device.precision,
+                            t,
+                            &[("name", &device.name)],
                         ));
                     });
                 });
@@ -241,7 +244,7 @@ impl App {
         let t = self.t;
         let state = device.state();
         let threshold = self.settings.threshold;
-        let low = |level: u8| level <= threshold;
+        let low = |level: u8| devices::warn_level(level, device.precision) <= threshold;
         theme::card(p).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.set_width(ui.available_width());
@@ -256,7 +259,7 @@ impl App {
                     };
                     if let Some((level, colour)) = number {
                         ui.label(
-                            RichText::new(format!("{level}%"))
+                            RichText::new(devices::level_text(level, device.precision, t))
                                 .font(FontId::new(22.0, theme::semibold()))
                                 .color(colour),
                         );
@@ -281,6 +284,11 @@ impl App {
                 State::Off(Some((level, _))) => level_bar(ui, p, level, p.muted),
                 _ => {}
             }
+            // Earbuds and case: "L 80% · R 70% · Case 40%".
+            if !device.parts.is_empty() {
+                let colour = if device.connected { p.text } else { p.muted };
+                ui.label(RichText::new(devices::parts_text(&device.parts, device.precision, t)).small().color(colour));
+            }
 
             ui.horizontal(|ui| {
                 // A small line: not the full height of a button row.
@@ -304,7 +312,7 @@ impl App {
                             State::Unreadable => p.warn,
                             _ => p.muted,
                         };
-                        let text = status_text(state, device.le, now, t);
+                        let text = status_text(device, now, t);
                         ui.add(egui::Label::new(RichText::new(&text).small().color(colour)).truncate())
                             .on_hover_text(text);
                     });
@@ -484,6 +492,7 @@ fn kind_label(kind: Kind, t: &Strings) -> &'static str {
         Kind::Mouse => t.kind_mouse,
         Kind::Keyboard => t.kind_keyboard,
         Kind::Gamepad => t.kind_gamepad,
+        Kind::Laptop => t.kind_laptop,
         Kind::Other => t.kind_other,
     }
 }
@@ -498,15 +507,17 @@ fn ago_text(ago: Ago, t: &Strings) -> String {
 }
 
 /// The small line under a device: what is known, and nothing that is not.
-fn status_text(state: State, le: bool, now: u64, t: &Strings) -> String {
-    let transport = if le { "Bluetooth LE" } else { "Bluetooth" };
-    match state {
+fn status_text(device: &Device, now: u64, t: &Strings) -> String {
+    let transport = devices::transport_text(device.transport, t);
+    match device.state() {
+        State::Live(_) if device.is_charging() => format!("{} · {} · {transport}", t.connected, t.charging),
         State::Live(_) => format!("{} · {transport}", t.connected),
         State::NotReported => t.no_report.to_owned(),
         State::Unreadable => t.unreadable.to_owned(),
         State::Off(Some((level, seen))) => {
             let when = ago_text(devices::ago(now, seen), t);
-            let last = fill(t.off_last, &[("level", &level.to_string()), ("when", &when)]);
+            // `off_last` says "{level}%": a coarse level is a word instead.
+            let last = devices::fill_level(t.off_last, level, device.precision, t, &[("when", &when)]);
             format!("{} · {last}", t.off)
         }
         State::Off(None) => format!("{} · {}", t.off, t.never_seen),
@@ -612,22 +623,53 @@ impl eframe::App for App {
 mod tests {
     use super::*;
 
+    use crate::devices::{Battery, Precision, Reading, Transport};
+
+    /// A device in a given state, through the same path a poll takes.
+    fn device(reading: Reading, before: Option<(u8, u64)>) -> Device {
+        let mut devices = Vec::new();
+        if let Some((level, seen)) = before {
+            let mut live = reading.clone();
+            live.connected = true;
+            live.battery = Battery::Level(level);
+            devices::apply(&mut devices, vec![live], seen, 0, None, false);
+        }
+        devices::apply(&mut devices, vec![reading], 1, 0, None, false);
+        devices.remove(0)
+    }
+
+    fn reading(transport: Transport, connected: bool, battery: Battery) -> Reading {
+        Reading { connected, battery, ..Reading::new("a", "A", Kind::Other, transport) }
+    }
+
     #[test]
     fn status_says_what_is_known_and_never_guesses() {
         let t = Lang::En.strings();
-        assert_eq!(status_text(State::Live(80), true, 0, t), "Connected · Bluetooth LE");
-        assert_eq!(status_text(State::Live(80), false, 0, t), "Connected · Bluetooth");
+        let status = |d: Device, now: u64| status_text(&d, now, t);
+        assert_eq!(status(device(reading(Transport::Le, true, Battery::Level(80)), None), 0), "Connected · Bluetooth LE");
+        assert_eq!(status(device(reading(Transport::Bluetooth, true, Battery::Level(80)), None), 0), "Connected · Bluetooth");
+        assert_eq!(status(device(reading(Transport::Receiver, true, Battery::Level(80)), None), 0), "Connected · USB receiver");
+        let charging = Reading { charging: Some(true), ..reading(Transport::Internal, true, Battery::Level(40)) };
+        assert_eq!(status(device(charging, None), 0), "Connected · charging · This PC");
         assert_eq!(
-            status_text(State::NotReported, false, 0, t),
+            status(device(reading(Transport::Bluetooth, true, Battery::NotReported), None), 0),
             "This device does not report its battery level"
         );
-        assert_eq!(status_text(State::Unreadable, true, 0, t), "Couldn't read the battery level");
         assert_eq!(
-            status_text(State::Off(Some((64, 1000))), false, 1000 + 2 * 3600 + 5, t),
-            "Off or out of range · last seen at 64%, 2 h ago"
+            status(device(reading(Transport::Le, true, Battery::Unreadable), None), 0),
+            "Couldn't read the battery level"
         );
         assert_eq!(
-            status_text(State::Off(None), false, 0, t),
+            status(device(reading(Transport::Bluetooth, false, Battery::Unreadable), Some((64, 1000))), 1000 + 2 * 3600 + 5),
+            "Off or out of range · last seen at 64%, 2 h ago"
+        );
+        let coarse = Reading { precision: Precision::Coarse, ..reading(Transport::Receiver, false, Battery::Unreadable) };
+        assert_eq!(
+            status(device(coarse, Some((25, 1000))), 1000),
+            "Off or out of range · last seen at Low, just now"
+        );
+        assert_eq!(
+            status(device(reading(Transport::Bluetooth, false, Battery::Unreadable), None), 0),
             "Off or out of range · no battery level seen yet"
         );
     }
@@ -645,7 +687,7 @@ mod tests {
     fn every_kind_has_a_label_in_every_language() {
         for lang in Lang::ALL {
             let t = lang.strings();
-            let labels: Vec<&str> = [Kind::Headphones, Kind::Mouse, Kind::Keyboard, Kind::Gamepad, Kind::Other]
+            let labels: Vec<&str> = [Kind::Headphones, Kind::Mouse, Kind::Keyboard, Kind::Gamepad, Kind::Laptop, Kind::Other]
                 .into_iter()
                 .map(|kind| kind_label(kind, t))
                 .collect();
