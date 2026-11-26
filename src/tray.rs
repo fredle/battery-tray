@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, IsWindow, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_LBUTTONUP, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
+    WM_ENDSESSION, WM_LBUTTONUP, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -646,8 +646,17 @@ fn quit(window: HWND) {
     for id in ids {
         send(NIM_DELETE, &icon_data(window, id));
     }
-    // Settings, devices and history are saved as they change.
+    save_devices();
+    // Settings and history are saved as they change.
     std::process::exit(0);
+}
+
+/// Writes devices.json with when each connected device was last seen,
+/// which polls leave out while nothing else changes.
+fn save_devices() {
+    if let Some(shared) = STATE.with_borrow(|s| s.as_ref().map(|s| s.shared.clone())) {
+        devices::save(&lock(&shared).devices);
+    }
 }
 
 /// Something Windows said that changes when to poll.
@@ -656,7 +665,9 @@ fn on_signal(event: Event) {
         let Some(s) = s.as_mut() else { return };
         match event {
             Event::Wake(wake) => s.monitor.wake(wake),
-            Event::Suspending => {}
+            // last_seen is only written when something changes; the PC
+            // may not come back (a battery that runs out), so now too.
+            Event::Suspending => devices::save(&lock(&s.shared).devices),
             Event::Changed(signal) => {
                 if let Some(conditions) = s.signals.apply(signal) {
                     s.monitor.wake(Wake::Conditions(conditions));
@@ -715,6 +726,12 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
                 theme_changed(window);
             }
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        WM_ENDSESSION => {
+            if wparam.0 != 0 {
+                save_devices();
+            }
+            LRESULT(0)
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
             // The tray's icon size may have changed.

@@ -95,7 +95,7 @@ pub fn poll(source: &mut dyn Source, shared: &SharedState) {
         let notices = devices::apply(&mut state.devices, readings, now, &state.rules, !state.applied);
         state.applied = true;
         state.pending.extend(notices);
-        if state.devices != before {
+        if devices::needs_saving(&before, &state.devices) {
             devices::save(&state.devices);
         }
         if record(&mut state.history, &state.devices, now) {

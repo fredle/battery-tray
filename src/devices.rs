@@ -816,6 +816,28 @@ pub fn parse_saved(json: &str) -> Vec<Device> {
     devices
 }
 
+/// Whether a poll changed anything worth writing to devices.json. Not
+/// `last_seen` moving on while a device stays connected, which would mean a
+/// write every minute for nothing: it is written when the device goes off
+/// (and when the app quits, or the PC sleeps or shuts down), which is when
+/// it matters, as "last seen at 64%, 2 h ago".
+pub fn needs_saving(before: &[Device], after: &[Device]) -> bool {
+    let same = |a: &Device, b: &Device| {
+        a.id == b.id
+            && a.name == b.name
+            && a.kind == b.kind
+            && a.transport == b.transport
+            && a.precision == b.precision
+            && a.last_level == b.last_level
+            && a.armed == b.armed
+            && a.parts == b.parts
+            && a.full_armed == b.full_armed
+            && a.hardware == b.hardware
+            && a.connected == b.connected
+    };
+    before.len() != after.len() || before.iter().zip(after).any(|(a, b)| !same(a, b))
+}
+
 pub fn save(devices: &[Device]) {
     let _ = std::fs::create_dir_all(crate::settings::data_dir());
     if let Ok(json) = serde_json::to_string_pretty(devices) {
@@ -852,6 +874,38 @@ mod tests {
             Part { kind: PartKind::Right, level: right, charging },
             Part { kind: PartKind::Case, level: case, charging: false },
         ]
+    }
+
+    #[test]
+    fn devices_json_is_written_for_changes_not_for_the_clock() {
+        let rules = rules(20, None, true);
+        let mut list = Vec::new();
+        apply(&mut list, vec![reading("a", "A", true, Battery::Level(80)), reading("b", "B", true, Battery::NotReported)], 100, &rules, true);
+        // The same levels a minute later: only `last_seen` moved.
+        let before = list.clone();
+        apply(&mut list, vec![reading("a", "A", true, Battery::Level(80)), reading("b", "B", true, Battery::NotReported)], 160, &rules, false);
+        assert_eq!(list[0].last_seen, 160);
+        assert!(!needs_saving(&before, &list));
+        // A new level.
+        let before = list.clone();
+        apply(&mut list, vec![reading("a", "A", true, Battery::Level(79)), reading("b", "B", true, Battery::NotReported)], 220, &rules, false);
+        assert!(needs_saving(&before, &list));
+        // Going off: written, with when it was last seen.
+        let before = list.clone();
+        apply(&mut list, vec![reading("a", "A", false, Battery::Unreadable), reading("b", "B", true, Battery::NotReported)], 280, &rules, false);
+        assert!(needs_saving(&before, &list));
+        assert_eq!(list.iter().find(|d| d.id == "a").unwrap().last_seen, 220);
+        // Still off: nothing.
+        let before = list.clone();
+        apply(&mut list, vec![reading("a", "A", false, Battery::Unreadable), reading("b", "B", true, Battery::NotReported)], 340, &rules, false);
+        assert!(!needs_saving(&before, &list));
+        // Renamed, or a device gone.
+        let before = list.clone();
+        apply(&mut list, vec![reading("a", "A2", false, Battery::Unreadable), reading("b", "B", true, Battery::NotReported)], 400, &rules, false);
+        assert!(needs_saving(&before, &list));
+        let before = list.clone();
+        apply(&mut list, vec![reading("b", "B", true, Battery::NotReported)], 460, &rules, false);
+        assert!(needs_saving(&before, &list));
     }
 
     #[test]
