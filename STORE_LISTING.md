@@ -35,7 +35,7 @@ Useful details:
 - Each device can have its own warning level. The warning appears once per discharge, never while charging. An optional "fully charged" alert is off by default.
 - A pop-up shows the level when a device connects after being off for a while, not for what is already connected when the app starts.
 - A device that does not report its battery says so. The "Tell us this model" button opens a note with its name and ID for you to read and send, or cancel.
-- Closing the window keeps the app in the tray. Starting with Windows is one tick. It checks about once a minute in the background, so the window never freezes.
+- Closing the window keeps the app in the tray. It starts with Windows by default; one tick in settings turns that off. It checks about once a minute in the background, so the window never freezes.
 
 About accuracy: the number comes from the device itself. Some report in steps of 10 or 20, Xbox controllers in four bands, and a few report nothing at all. Battery Tray shows exactly what the device reports.
 
