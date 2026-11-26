@@ -83,11 +83,11 @@ fn run_window(args: Vec<String>, start: Start, link: Option<(Link, SharedState)>
         .with_decorations(false)
         .with_resizable(false)
         .with_maximize_button(false);
-    // eframe shows its window after the first frame: the flyout is drawn
-    // once off-screen to learn its height, then put in the corner (see
-    // `App::ui`), without a taskbar button.
+    // A flyout (or a window made ready while the pointer is on an icon) is
+    // drawn once off-screen to learn its height; the link thread then puts
+    // it in the corner (`link.rs`). No taskbar button.
     let viewport = match start {
-        Start::Flyout => viewport.with_position(OFF_SCREEN).with_taskbar(false),
+        Start::Flyout | Start::Hidden => viewport.with_position(OFF_SCREEN).with_taskbar(false),
         Start::Pinned => viewport,
     };
     let options = eframe::NativeOptions { viewport, ..Default::default() };
@@ -189,9 +189,6 @@ impl App {
                     shared.rules = rules;
                     shared.lang = lang;
                 }
-                if let Some(w) = window {
-                    link.attach(w, ctx.clone());
-                }
                 (Some(link), shared, None)
             }
             None if shots.is_some() => {
@@ -209,7 +206,7 @@ impl App {
         // A flyout is drawn once while hidden, to learn its height, and then
         // shown; a pinned window is shown as it is.
         lock(&shared).window.mode = match start {
-            Start::Flyout => Mode::Hidden,
+            Start::Flyout | Start::Hidden => Mode::Hidden,
             Start::Pinned => Mode::Pinned,
         };
         if let Some(w) = window
@@ -1074,27 +1071,16 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide(false);
         }
-        // eframe shows the window once it has drawn it: then it is put where
-        // it belongs and brought to the front.
+        // A pinned start: eframe shows the window once it has drawn it, then
+        // it is brought to the front. (A flyout is shown by the link thread
+        // as soon as the first frame is drawn: see the end of this function.)
         self.frames = self.frames.saturating_add(1);
-        if self.start.is_some() {
-            if self.frames >= 2
-                && let (Some(start), Some(w)) = (self.start.take(), self.window)
-            {
-                match start {
-                    Start::Flyout => {
-                        let height = {
-                            let mut shared = lock(&self.shared);
-                            shared.window.mode = Mode::Flyout;
-                            shared.window.shown += 1;
-                            shared.window.height
-                        };
-                        flyout::show_flyout(w, height);
-                    }
-                    Start::Pinned => flyout::raise(w),
-                }
-            }
-            ctx.request_repaint();
+        if self.frames >= 2
+            && self.start == Some(Start::Pinned)
+            && let Some(w) = self.window
+        {
+            self.start = None;
+            flyout::raise(w);
         }
         if let Some(link) = self.link {
             // A half-written note keeps the process from closing while hidden.
@@ -1212,6 +1198,15 @@ impl eframe::App for App {
         if self.own_border || self.shots.is_some() {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("border")));
             painter.rect_stroke(ctx.content_rect(), 0, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        }
+
+        // The first frame is drawn (it is painted the moment this returns):
+        // the link thread may now show the window, at the height just
+        // measured, and act on clicks.
+        if self.frames == 1
+            && let (Some(link), Some(w), Some(start)) = (self.link, self.window, self.start)
+        {
+            link.attach(w, ctx.clone(), start);
         }
     }
 }

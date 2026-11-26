@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::flyout::{self, Mode, TrayClick};
-use crate::ipc::{self, ToTray, ToWindow, hwnd};
+use crate::ipc::{self, Start, ToTray, ToWindow, hwnd};
 use crate::monitor::{SharedState, lock};
 
 const CLASS: PCWSTR = w!("BatteryTrayWindowLink");
@@ -38,6 +38,9 @@ const WM_HIDDEN: u32 = WM_APP + 2;
 const WM_TRAY_GONE: u32 = WM_APP + 3;
 const LINGER_TIMER: usize = 1;
 const EXIT_TIMER: usize = 2;
+const HIDE_TIMER: usize = 3;
+/// How often a window started hidden checks whether eframe has shown it yet.
+const HIDE_CHECK: Duration = Duration::from_millis(50);
 
 /// How long a hidden window stays ready before its process ends. A click
 /// within this reopens it at once; after it, the window starts afresh
@@ -61,6 +64,8 @@ struct State {
     inbox: Vec<ToWindow>,
     /// The history.json write last read.
     history_rev: Option<u64>,
+    /// Times a window started hidden was checked for eframe showing it.
+    hide_checks: u32,
 }
 
 thread_local! {
@@ -90,7 +95,7 @@ impl Link {
                 return;
             }
             STATE.with_borrow_mut(|state| {
-                *state = Some(State { shared, tray, main: None, inbox: Vec::new(), history_rev: None });
+                *state = Some(State { shared, tray, main: None, inbox: Vec::new(), history_rev: None, hide_checks: 0 });
             });
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -103,11 +108,12 @@ impl Link {
         ToTray::Hello(window).post(tray).then_some(Link { tray, window })
     }
 
-    /// The main window and egui, now that eframe has made them; handles
+    /// The main window and egui, once eframe has drawn the first frame;
+    /// shows the flyout if that is how the process started, and handles
     /// whatever arrived before.
-    pub fn attach(&self, main: isize, ctx: egui::Context) {
+    pub fn attach(&self, main: isize, ctx: egui::Context, start: Start) {
         // The state lives on the link thread: hand them over there.
-        let boxed = Box::new((main, ctx));
+        let boxed = Box::new((main, ctx, start));
         unsafe {
             let _ = PostMessageW(Some(hwnd(self.window)), WM_ATTACH, WPARAM(0), LPARAM(Box::into_raw(boxed) as isize));
         }
@@ -328,13 +334,41 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             LRESULT(0)
         }
         WM_ATTACH => {
-            let boxed = unsafe { Box::from_raw(lparam.0 as *mut (isize, egui::Context)) };
+            let (main, ctx, start) = *unsafe { Box::from_raw(lparam.0 as *mut (isize, egui::Context, Start)) };
             STATE.with_borrow_mut(|s| {
                 if let Some(s) = s.as_mut() {
-                    s.main = Some(*boxed);
+                    s.main = Some((main, ctx));
+                    // Started by a click: that click, before any that came since.
+                    if start == Start::Flyout {
+                        s.inbox.insert(0, ToWindow::Click);
+                    }
                 }
             });
+            if start == Start::Hidden {
+                // eframe shows the window (off-screen) once it is drawn;
+                // out of sight it goes, until the click.
+                unsafe { SetTimer(Some(window), HIDE_TIMER, HIDE_CHECK.as_millis() as u32, None) };
+            }
             handle_inbox(window);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == HIDE_TIMER => {
+            let found = STATE.with_borrow_mut(|s| {
+                let s = s.as_mut()?;
+                s.hide_checks += 1;
+                Some((s.shared.clone(), s.main.as_ref()?.0, s.hide_checks))
+            });
+            let Some((shared, main, checks)) = found else { return LRESULT(0) };
+            let hidden = lock(&shared).window.mode == Mode::Hidden;
+            if !hidden || flyout::visible(main) || checks > 50 {
+                unsafe {
+                    let _ = KillTimer(Some(window), HIDE_TIMER);
+                }
+                if hidden {
+                    flyout::hide(main);
+                    linger(window, &shared);
+                }
+            }
             LRESULT(0)
         }
         WM_HIDDEN => {

@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, IsWindow, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ENDSESSION, WM_LBUTTONUP, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
+    WM_ENDSESSION, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -153,15 +153,17 @@ impl WindowProcess {
 
     fn deliver(&mut self, message: ToWindow) {
         let route = route(self.running(), self.link.is_some(), &message);
+        if matches!(message, ToWindow::Click | ToWindow::Open)
+            && let Some(pid) = self.pid()
+        {
+            // The click gave this process the right to bring a window to
+            // the front; pass it on.
+            unsafe {
+                let _ = AllowSetForegroundWindow(pid);
+            }
+        }
         match route {
             Route::Send => {
-                if matches!(message, ToWindow::Click | ToWindow::Open)
-                    && let Some(pid) = self.pid()
-                {
-                    unsafe {
-                        let _ = AllowSetForegroundWindow(pid);
-                    }
-                }
                 if let Some(link) = self.link
                     && !ipc::send(link, &message)
                 {
@@ -173,6 +175,14 @@ impl WindowProcess {
             Route::Wait => self.waiting.push(message),
             Route::Start(start) => self.start(start),
             Route::Drop => {}
+        }
+    }
+
+    /// The pointer is on a tray icon: a click is likely, so the window
+    /// process starts now, hidden, and the click finds it ready.
+    fn prepare(&mut self) {
+        if !self.running() {
+            self.start(Start::Hidden);
         }
     }
 
@@ -701,6 +711,11 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
         WM_TRAY => {
             match lparam.0 as u32 & 0xffff {
                 WM_LBUTTONUP => to_window(ToWindow::Click),
+                WM_MOUSEMOVE => {
+                    let Some(mut process) = STATE.with_borrow_mut(|s| s.as_mut().map(|s| std::mem::take(&mut s.window))) else { return LRESULT(0) };
+                    process.prepare();
+                    put_back(process);
+                }
                 WM_RBUTTONUP | WM_CONTEXTMENU => menu(window),
                 _ => {}
             }

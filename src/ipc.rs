@@ -36,6 +36,8 @@ pub enum Start {
     Flyout,
     /// The tray menu's Open, or the app started from the Start menu.
     Pinned,
+    /// The pointer is on a tray icon: be ready for the click, hidden.
+    Hidden,
 }
 
 impl Start {
@@ -43,6 +45,7 @@ impl Start {
         match self {
             Start::Flyout => "flyout",
             Start::Pinned => "pinned",
+            Start::Hidden => "hidden",
         }
     }
 
@@ -51,6 +54,7 @@ impl Start {
         let at = args.iter().position(|a| a == UI_ARG)?;
         match args.get(at + 1).map(String::as_str) {
             Some("pinned") => Some(Start::Pinned),
+            Some("hidden") => Some(Start::Hidden),
             _ => Some(Start::Flyout),
         }
     }
@@ -252,7 +256,7 @@ mod tests {
         assert_eq!(Start::from_args(&args(&["--ui", "flyout"])), Some(Start::Flyout));
         assert_eq!(Start::from_args(&args(&["--ui"])), Some(Start::Flyout));
         assert_eq!(Start::from_args(&args(&["--tray"])), None);
-        for start in [Start::Flyout, Start::Pinned] {
+        for start in [Start::Flyout, Start::Pinned, Start::Hidden] {
             assert_eq!(Start::from_args(&args(&["--ui", start.arg()])), Some(start));
         }
     }
