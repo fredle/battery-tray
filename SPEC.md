@@ -16,14 +16,23 @@ Windows keeps the battery level of Bluetooth devices several clicks deep in Sett
 - The PC's own battery, on laptops only
 - One card per device even when several sources see it; a source that fails keeps its last readings and never blanks the others
 - Each card says how the device is connected (Bluetooth, Bluetooth LE, USB receiver, USB, This PC) and whether it is charging; no warning while a device charges
-- Tray icon with the percentage of one chosen device drawn into it; every device in the tooltip and the tray menu
+- Tray icons: one per device the user ticks, each with its own icon id so Windows remembers whether it was dragged onto the taskbar (the first keeps v0.1.4's id). The level is drawn as a number in the taskbar's text colour (light or dark taskbar, followed live) over a thin level bar: red at the device's warning level, green while charging. Coarse devices show a battery with 0-3 segments, 100% a full battery, never a made-up number; with no device to show, the app's own icon. Rendered at the size Windows uses for tray icons at the current scale (16, 20, 24, 32 px...), not scaled. Each icon's tooltip names its device; the first also lists the devices without an icon; every icon has the same menu
+- Left-click any tray icon: a Windows 11 style flyout in the corner of the screen next to the tray (whichever edge the taskbar is on, on the monitor that has it, at that monitor's scale), borderless with Windows' rounded corners and shadow, as tall as its content, closed by clicking elsewhere, Esc or the icon again. Its pin button turns it into an ordinary window that stays; the tray menu's Open and starting the app from the Start menu open that window directly. Solid colours, no translucent backdrop (not reliable with the OpenGL renderer)
+- Light and dark, following Windows' app setting live
 - Closing the window hides it to the tray; the tray menu has Open and Quit
-- A window with one card per device: name, kind, level bar, and for a device that is off, its last level and how long ago
-- A plain "this device does not report its battery level" instead of a guess
-- Low-battery warning at a threshold the user sets (default 20%), once per discharge, re-armed when the level rises above the threshold
+- One card per device: a drawn picture of its kind, name, connection, level (a word for coarse devices), a level bar or, for AirPods, three labelled bars for left, right and case, a charging bolt, and for a device that is off its last level and how long ago. A device that does not report its level says so, explains that some models only tell their maker's app, and offers "Tell us this model": it opens the feedback box with the name, kind, connection and Bluetooth vendor/product ID already written in, for the user to read, edit and send or cancel
+- Clicking a card opens its battery history: a step graph of the last 7 days with charging in green and the warning level dashed. Under a discharging device's name, "about N hours/days left" from that history (wall-clock time at the device's usual use), shown only with enough history (Tens-precision devices need a longer baseline), never for coarse levels, never more than 60 days out
+- Battery history: a sample whenever a device's level or charging state changes, kept 30 days and at most 2,000 samples per device, forgotten with the device; written only when a sample is added (history.json)
+- Low-battery warning at a level the user sets (default 20%), or a level set for one device; once per discharge, re-armed when the level rises above it; never while charging
+- "Fully charged" notification once per charge, for devices that report charging (off by default)
+- "<name> connected - 82%" notification (with left, right and case for AirPods) when a device connects after being off for at least 15 minutes; never for what is connected when the app starts (on by default)
+- Notifications are the tray icon's balloons, which Windows 10 and 11 show as toasts without an AppUserModelID or Start-menu shortcut; from the device's own icon if it has one
+- First run: a hint that Windows hides new tray icons, how to bring Battery Tray out, and a button to the taskbar settings; dismissed for good with "Got it"
+- A settings page in the same window: default warning level, each device's tray icon and warning level, the two notifications, start with Windows, language, and the unlock
 - "Start with Windows" (current user's Run key, no admin rights)
-- Polls in a background thread about once a minute; the window never waits for Bluetooth
-- Free: every device's level in the window, tooltip and menu, plus the tray icon and the low-battery warning for one chosen device. A one-off unlock (£2.99, licence key, checked offline) gives low-battery warnings for every device
+- Polls in a background thread about once a minute; the window never waits for Bluetooth, and does not redraw while hidden
+- Free: every device's level in the window, tooltip and menu, the "connected" notification, plus one tray icon and the low-battery and fully charged warnings for one chosen device. A one-off unlock (£2.99, licence key, checked offline) gives warnings and a tray icon for every device, the battery history graph and the time left. History is recorded for everyone, so it is there on the day of unlocking
+- Screenshot mode for development and the Store: `battery_tray.exe --shots <folder> [--theme light|dark] [--scale 1.5] [--lang de]` draws made-up scenes and writes each as PNG, then exits; nothing real happens in it
 
 ## Non-goals
 
