@@ -6,7 +6,9 @@ use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crate::devices::{self, Device, Warning};
+use crate::devices::{self, Device, Notice, Rules};
+use crate::flyout::WindowState;
+use crate::history::{self, History};
 use crate::i18n::Lang;
 use crate::source::Source;
 
@@ -17,13 +19,32 @@ pub struct Shared {
     pub devices: Vec<Device>,
     /// False until the first poll has finished.
     pub polled: bool,
-    /// The user's choice of tray device, if any (see `devices::tray_device`).
-    pub tray_device: Option<String>,
-    pub threshold: u8,
-    pub licensed: bool,
+    /// False until a poll has read the devices. What the first such poll
+    /// finds connected is not news.
+    pub applied: bool,
+    /// Warning levels, tray choice, unlock and notification switches.
+    pub rules: Rules,
     pub lang: Lang,
-    /// Warnings waiting for the tray to show them as notifications.
-    pub pending: Vec<Warning>,
+    /// Notifications waiting for the tray to show them.
+    pub pending: Vec<Notice>,
+    pub history: History,
+    /// Whether the window is hidden, a flyout or pinned.
+    pub window: WindowState,
+}
+
+impl Shared {
+    pub fn new(devices: Vec<Device>, history: History, rules: Rules, lang: Lang) -> Shared {
+        Shared {
+            devices,
+            polled: false,
+            applied: false,
+            rules,
+            lang,
+            pending: Vec::new(),
+            history,
+            window: WindowState::default(),
+        }
+    }
 }
 
 pub type SharedState = Arc<Mutex<Shared>>;
@@ -57,20 +78,30 @@ pub fn poll(source: &mut dyn Source, shared: &SharedState) {
     if let Some(readings) = readings {
         let state = &mut *state;
         let before = state.devices.clone();
-        let warnings = devices::apply(
-            &mut state.devices,
-            readings,
-            now(),
-            state.threshold,
-            state.tray_device.as_deref(),
-            state.licensed,
-        );
-        state.pending.extend(warnings);
+        let now = now();
+        let notices = devices::apply(&mut state.devices, readings, now, &state.rules, !state.applied);
+        state.applied = true;
+        state.pending.extend(notices);
         if state.devices != before {
             devices::save(&state.devices);
         }
+        if record(&mut state.history, &state.devices, now) {
+            history::save(&state.history);
+        }
     }
     state.polled = true;
+}
+
+/// Adds what changed to the history and drops what is too old or no
+/// longer paired. Returns whether the file needs writing.
+pub fn record(history: &mut History, devices: &[Device], now: u64) -> bool {
+    let mut changed = false;
+    for device in devices {
+        if let Some(level) = device.live_level() {
+            changed |= history.record(&device.id, now, level, device.is_charging());
+        }
+    }
+    changed | history.compact(now, |id| devices.iter().any(|d| d.id == id))
 }
 
 pub struct Monitor {
@@ -132,19 +163,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("battery-tray-test-{}", std::process::id()));
         unsafe { std::env::set_var("LOCALAPPDATA", &dir) };
 
-        let shared: SharedState = Arc::new(Mutex::new(Shared {
-            devices: Vec::new(),
-            polled: false,
-            tray_device: None,
-            threshold: 20,
-            licensed: false,
-            lang: Lang::En,
-            pending: Vec::new(),
-        }));
-        let mut source = Script(vec![mouse(50), None, mouse(18), mouse(17), mouse(60), mouse(9)]);
+        let shared: SharedState = Arc::new(Mutex::new(Shared::new(Vec::new(), History::default(), Rules::default(), Lang::En)));
+        let mut source = Script(vec![None, mouse(50), None, mouse(18), mouse(17), mouse(60), mouse(9)]);
+
+        // A failed first read: polled, but nothing applied yet.
+        poll(&mut source, &shared);
+        assert!(lock(&shared).polled && !lock(&shared).applied);
 
         poll(&mut source, &shared);
-        assert!(lock(&shared).polled);
+        assert!(lock(&shared).applied);
+        // Connected at the first read: no "connected" pop-up.
         assert!(lock(&shared).pending.is_empty());
 
         // A failed read changes nothing.
@@ -154,7 +182,7 @@ mod tests {
         poll(&mut source, &shared);
         poll(&mut source, &shared);
         assert_eq!(lock(&shared).pending.len(), 1);
-        assert_eq!(lock(&shared).pending[0].level, 18);
+        assert_eq!(lock(&shared).pending[0].level, Some(18));
 
         poll(&mut source, &shared);
         poll(&mut source, &shared);
@@ -164,6 +192,9 @@ mod tests {
         let saved = devices::load();
         assert_eq!(saved[0].last_level, Some(9));
         assert!(!saved[0].armed);
+        // And the history of every change, for the graph.
+        let levels: Vec<u8> = history::load().samples("m").iter().map(|s| s.level()).collect();
+        assert_eq!(levels, [50, 18, 17, 60, 9]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
