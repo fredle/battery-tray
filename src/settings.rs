@@ -86,6 +86,23 @@ impl Settings {
         self.tray_device = list.first().cloned();
         self.tray_devices = list;
     }
+
+    /// What decides warnings, alerts and tray icons.
+    pub fn rules(&self, licensed: bool) -> crate::devices::Rules {
+        crate::devices::Rules {
+            threshold: self.threshold,
+            overrides: self.thresholds.clone(),
+            tray: self.tray_list(),
+            licensed,
+            notify_connect: self.notify_connect,
+            notify_full: self.notify_full,
+        }
+    }
+
+    /// The display language: the chosen one, or Windows'.
+    pub fn lang(&self) -> crate::i18n::Lang {
+        self.language.unwrap_or_else(crate::i18n::Lang::system)
+    }
 }
 
 pub fn data_dir() -> std::path::PathBuf {

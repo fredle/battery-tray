@@ -1,7 +1,9 @@
-//! The tray icons, their tooltips, the menu and notifications, plus opening
-//! the window as a flyout or pinned. It runs on its own thread with its own
-//! hidden window and message loop, so it keeps working while the main
-//! window is hidden (eframe stops calling the app then).
+//! The resident process: what runs all day. Tray icons, their tooltips, the
+//! menu and notifications, the monitor thread that polls, and starting the
+//! window process when the window is wanted. It has no window of its own
+//! beyond a hidden one for messages, and no egui: the window (`app.rs`) is
+//! the same exe started with `--ui`, which ends itself soon after it is
+//! hidden (`link.rs`, `ipc.rs`).
 //!
 //! Plain Win32 through the `windows` crate: `Shell_NotifyIconW` for the
 //! icons and notifications (balloons, which Windows 10 and 11 show as
@@ -14,10 +16,8 @@
 //! stays pinned; the others take an id made from the device's id.
 
 use std::cell::RefCell;
-use std::sync::mpsc::channel;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
 
-use eframe::egui;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -25,23 +25,24 @@ use windows::Win32::UI::Shell::{
     NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, HICON, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG,
-    PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
+    AllowSetForegroundWindow, AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetWindowThreadProcessId,
+    HICON, IsWindow, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::devices::{self, Device, Notice, NoticeKind, Rules, State as DeviceState};
-use crate::flyout::{self, Mode, TrayClick};
 use crate::i18n::{Strings, fill};
 use crate::icon::{self, Look, Spec, Tone};
-use crate::monitor::{SharedState, lock};
+use crate::ipc::{self, Start, ToTray, ToWindow};
+use crate::monitor::{Monitor, Shared, SharedState, lock};
 use crate::theme;
 
-/// Also how a second copy of the app finds the running one.
-const CLASS: PCWSTR = w!("BatteryTrayHiddenWindow");
+/// Also how a second copy of the app, and the window process, find it.
+pub const CLASS: PCWSTR = w!("BatteryTrayHiddenWindow");
 /// From a tray icon; `wparam` is the icon's id, `lparam` the mouse message.
 const WM_TRAY: u32 = WM_APP + 1;
 /// Show the main window, pinned.
@@ -64,26 +65,126 @@ struct Shown {
 
 struct State {
     shared: SharedState,
-    /// The main window, as a number so it can cross threads.
-    main_window: isize,
-    ctx: egui::Context,
+    monitor: Monitor,
     icons: Vec<Shown>,
     taskbar_created: u32,
     light_taskbar: bool,
+    window: WindowProcess,
 }
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-/// A handle to the tray thread.
-#[derive(Clone, Copy)]
-pub struct Tray {
-    window: isize,
-}
-
 fn hwnd(value: isize) -> HWND {
     HWND(value as *mut core::ffi::c_void)
+}
+
+/// What to do with a message for the window process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Send,
+    /// It is starting: hand it over once it says hello.
+    Wait,
+    Start(Start),
+    Drop,
+}
+
+/// Where a message for the window process goes, by whether the process is
+/// running and has said hello. A state is only worth sending to a window
+/// that is there (one that is starting gets the state with its hello); a
+/// click or Open starts one.
+fn route(running: bool, linked: bool, message: &ToWindow) -> Route {
+    match (running, linked, message) {
+        (true, true, _) => Route::Send,
+        (true, false, ToWindow::State(_)) => Route::Drop,
+        (true, false, _) => Route::Wait,
+        (false, _, ToWindow::Click) => Route::Start(Start::Flyout),
+        (false, _, ToWindow::Open) => Route::Start(Start::Pinned),
+        (false, _, _) => Route::Drop,
+    }
+}
+
+/// The window process, while there is one.
+#[derive(Default)]
+struct WindowProcess {
+    child: Option<std::process::Child>,
+    /// Its link window, once it has said hello.
+    link: Option<isize>,
+    waiting: Vec<ToWindow>,
+}
+
+impl WindowProcess {
+    fn running(&mut self) -> bool {
+        let alive = match &mut self.child {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            // One this process did not start (`battery_tray.exe --ui`).
+            None => self.link.is_some_and(|l| unsafe { IsWindow(Some(hwnd(l))).as_bool() }),
+        };
+        if !alive {
+            *self = WindowProcess::default();
+        }
+        alive
+    }
+
+    /// The process id, to let it take the foreground.
+    fn pid(&self) -> Option<u32> {
+        if let Some(child) = &self.child {
+            return Some(child.id());
+        }
+        let mut pid = 0u32;
+        self.link.map(|l| unsafe { GetWindowThreadProcessId(hwnd(l), Some(&mut pid)) });
+        (pid != 0).then_some(pid)
+    }
+
+    fn start(&mut self, start: Start) {
+        let Ok(exe) = std::env::current_exe() else { return };
+        if let Ok(child) = std::process::Command::new(exe).args([ipc::UI_ARG, start.arg()]).spawn() {
+            // The click gave this process the right to bring a window to the
+            // front; pass it on.
+            unsafe {
+                let _ = AllowSetForegroundWindow(child.id());
+            }
+            self.child = Some(child);
+        }
+    }
+
+    fn deliver(&mut self, message: ToWindow) {
+        let route = route(self.running(), self.link.is_some(), &message);
+        match route {
+            Route::Send => {
+                if matches!(message, ToWindow::Click | ToWindow::Open)
+                    && let Some(pid) = self.pid()
+                {
+                    unsafe {
+                        let _ = AllowSetForegroundWindow(pid);
+                    }
+                }
+                if let Some(link) = self.link
+                    && !ipc::send(link, &message)
+                {
+                    // Gone or hung: forget the line; it is started afresh
+                    // once the process has ended.
+                    self.link = None;
+                }
+            }
+            Route::Wait => self.waiting.push(message),
+            Route::Start(start) => self.start(start),
+            Route::Drop => {}
+        }
+    }
+
+    /// The window process said hello: its state, then what was waiting.
+    fn hello(&mut self, link: isize, state: ToWindow) {
+        self.link = Some(link);
+        if !ipc::send(link, &state) {
+            self.link = None;
+            return;
+        }
+        for message in std::mem::take(&mut self.waiting) {
+            self.deliver(message);
+        }
+    }
 }
 
 /// Whether the app is already running; `open` also asks it to show its window.
@@ -101,40 +202,109 @@ pub fn running_instance(open: bool) -> bool {
     }
 }
 
-impl Tray {
-    /// Starts the tray thread. `None` if Windows would not create it, in
-    /// which case the app behaves like an ordinary window.
-    pub fn start(shared: SharedState, main_window: isize, ctx: egui::Context) -> Option<Tray> {
-        let (sender, receiver) = channel();
-        std::thread::spawn(move || unsafe {
-            let window = create_window();
-            let _ = sender.send(window.map(|w| w.0 as isize));
-            let Some(window) = window else { return };
-            STATE.with_borrow_mut(|state| {
-                *state = Some(State {
-                    shared,
-                    main_window,
-                    ctx,
-                    icons: Vec::new(),
-                    taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-                    light_taskbar: theme::taskbar_light(),
-                });
-            });
-            update(window, true);
-            let mut message = MSG::default();
-            while GetMessageW(&mut message, None, 0, 0).as_bool() {
-                let _ = TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        });
-        let window = receiver.recv().ok()??;
-        Some(Tray { window })
+/// Runs the resident process on this thread until Quit. `open`: show the
+/// pinned window straight away (started from the Start menu). False if
+/// Windows would not make the hidden window, in which case the caller runs
+/// the window in this process instead, as an ordinary window.
+pub fn run(open: bool) -> bool {
+    // Without eframe in this process nothing else says so, and the tray
+    // icons must be drawn at the real size, not scaled up blurred.
+    unsafe {
+        use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    let settings = crate::settings::load();
+    let licensed = crate::license::verify(&settings.license_key).is_some();
+    let shared: SharedState = Arc::new(Mutex::new(Shared::new(
+        devices::load(),
+        crate::history::load(),
+        settings.rules(licensed),
+        settings.lang(),
+    )));
+    let Some(window) = (unsafe { create_window() }) else { return false };
+    let raw = window.0 as isize;
+    let monitor = Monitor::start(crate::source::pick(), shared.clone(), move || unsafe {
+        let _ = PostMessageW(Some(hwnd(raw)), WM_REFRESH, WPARAM(0), LPARAM(0));
+    });
+    STATE.with_borrow_mut(|state| {
+        *state = Some(State {
+            shared,
+            monitor,
+            icons: Vec::new(),
+            taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            light_taskbar: theme::taskbar_light(),
+            window: WindowProcess::default(),
+        });
+    });
+    update(window, true);
+    if open {
+        to_window(ToWindow::Open);
+    }
+    unsafe {
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    true
+}
 
-    /// Tells the tray that the shared state changed. Safe from any thread.
-    pub fn refresh(&self) {
-        unsafe {
-            let _ = PostMessageW(Some(hwnd(self.window)), WM_REFRESH, WPARAM(0), LPARAM(0));
+/// Hands a message to the window process, starting it if need be.
+fn to_window(message: ToWindow) {
+    // Taken out of the state while it is in use: Windows may call
+    // `window_proc` again while a message is on its way.
+    let Some(mut process) = STATE.with_borrow_mut(|s| s.as_mut().map(|s| std::mem::take(&mut s.window))) else { return };
+    process.deliver(message);
+    put_back(process);
+}
+
+fn put_back(process: WindowProcess) {
+    STATE.with_borrow_mut(|s| {
+        if let Some(s) = s.as_mut() {
+            s.window = process;
+        }
+    });
+}
+
+/// What the window process needs to show: the devices as they are now.
+fn state_message() -> Option<ToWindow> {
+    let shared = STATE.with_borrow(|s| s.as_ref().map(|s| s.shared.clone()))?;
+    let shared = lock(&shared);
+    Some(ToWindow::State(ipc::Snapshot::new(&shared.devices, shared.polled, shared.history_rev)))
+}
+
+/// A message from the window process.
+fn from_window(window: HWND, message: ToTray) {
+    match message {
+        ToTray::Hello(link) => {
+            let Some(state) = state_message() else { return };
+            let Some(mut process) = STATE.with_borrow_mut(|s| s.as_mut().map(|s| std::mem::take(&mut s.window))) else { return };
+            process.hello(link, state);
+            put_back(process);
+        }
+        ToTray::Settings { refresh } => {
+            // The window process saved them; the rules and language follow.
+            let settings = crate::settings::load();
+            let licensed = crate::license::verify(&settings.license_key).is_some();
+            STATE.with_borrow(|s| {
+                if let Some(s) = s.as_ref() {
+                    let mut shared = lock(&s.shared);
+                    shared.rules = settings.rules(licensed);
+                    shared.lang = settings.lang();
+                }
+            });
+            update(window, false);
+            if refresh {
+                STATE.with_borrow(|s| s.as_ref().map(|s| s.monitor.refresh()));
+            }
+        }
+        ToTray::Refresh => {
+            STATE.with_borrow(|s| s.as_ref().map(|s| s.monitor.refresh()));
+        }
+        ToTray::Bye => {
+            // Forgotten at once: a click while it closes starts a new one.
+            STATE.with_borrow_mut(|s| s.as_mut().map(|s| s.window = WindowProcess::default()));
         }
     }
 }
@@ -418,61 +588,11 @@ fn send(message: NOTIFY_ICON_MESSAGE, data: &NOTIFYICONDATAW) {
     }
 }
 
-/// The main window and egui context, for showing the window.
-fn target() -> Option<(SharedState, isize, egui::Context)> {
-    STATE.with_borrow(|state| state.as_ref().map(|s| (s.shared.clone(), s.main_window, s.ctx.clone())))
-}
-
-/// A left click on any of the icons: open or close the flyout.
-fn tray_click() {
-    let Some((shared, main, ctx)) = target() else { return };
-    let (click, height) = {
-        let mut shared = lock(&shared);
-        let click = shared.window.on_tray_click(Instant::now());
-        match click {
-            TrayClick::Flyout => {
-                shared.window.mode = Mode::Flyout;
-                shared.window.shown += 1;
-            }
-            TrayClick::Hide => shared.window.mode = Mode::Hidden,
-            _ => {}
-        }
-        (click, shared.window.height)
-    };
-    // The lock is free again before Windows calls into the main window.
-    match click {
-        TrayClick::Flyout => flyout::show_flyout(main, height),
-        TrayClick::Hide => flyout::hide(main),
-        TrayClick::Raise => flyout::raise(main),
-        TrayClick::Nothing => {}
-    }
-    ctx.request_repaint();
-}
-
-/// The tray menu's Open, or a second copy of the app started: the window,
-/// pinned.
-fn open_pinned() {
-    let Some((shared, main, ctx)) = target() else { return };
-    let was = {
-        let mut shared = lock(&shared);
-        let was = shared.window.mode;
-        shared.window.mode = Mode::Pinned;
-        shared.window.shown += 1;
-        was
-    };
-    match was {
-        Mode::Pinned if flyout::visible(main) => flyout::raise(main),
-        Mode::Flyout => flyout::show_pinned(main, false),
-        _ => flyout::show_pinned(main, true),
-    }
-    ctx.request_repaint();
-}
-
 /// The right-click menu: every device, then Open and Quit.
 fn menu(window: HWND) {
     // Collected first: the menu runs its own message loop, during which
     // `update` may need the state again.
-    let Some((lines, open, quit)) = STATE.with_borrow(|state| {
+    let Some((lines, open, quit_text)) = STATE.with_borrow(|state| {
         let state = state.as_ref()?;
         let shared = lock(&state.shared);
         let t = shared.lang.strings();
@@ -492,7 +612,7 @@ fn menu(window: HWND) {
             let _ = AppendMenuW(popup, MF_SEPARATOR, 0, PCWSTR::null());
         }
         let _ = AppendMenuW(popup, MF_STRING, MENU_OPEN, &HSTRING::from(open));
-        let _ = AppendMenuW(popup, MF_STRING, MENU_QUIT, &HSTRING::from(quit));
+        let _ = AppendMenuW(popup, MF_STRING, MENU_QUIT, &HSTRING::from(quit_text));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         // Without this the menu does not close when the user clicks away.
@@ -501,54 +621,59 @@ fn menu(window: HWND) {
         let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(popup);
         match chosen.0 as usize {
-            MENU_OPEN => open_pinned(),
-            MENU_QUIT => {
-                let ids: Vec<u32> = STATE
-                    .with_borrow(|state| state.as_ref().map(|s| s.icons.iter().map(|i| i.planned.id).collect()))
-                    .unwrap_or_default();
-                for id in ids {
-                    send(NIM_DELETE, &icon_data(window, id));
-                }
-                // Settings, devices and history are saved as they change.
-                std::process::exit(0);
-            }
+            MENU_OPEN => to_window(ToWindow::Open),
+            MENU_QUIT => quit(window),
             _ => {}
         }
     }
 }
 
+/// Quit: the window process goes too (it also notices this process end).
+fn quit(window: HWND) {
+    to_window(ToWindow::Quit);
+    let ids: Vec<u32> = STATE
+        .with_borrow(|state| state.as_ref().map(|s| s.icons.iter().map(|i| i.planned.id).collect()))
+        .unwrap_or_default();
+    for id in ids {
+        send(NIM_DELETE, &icon_data(window, id));
+    }
+    // Settings, devices and history are saved as they change.
+    std::process::exit(0);
+}
+
 /// Windows' light/dark setting changed: recolour the icons for the
-/// taskbar, and the window for apps.
+/// taskbar. (The window process follows it by itself.)
 fn theme_changed(window: HWND) {
     let light = theme::taskbar_light();
-    let ctx = STATE.with_borrow_mut(|state| {
-        let state = state.as_mut()?;
-        state.light_taskbar = light;
-        Some(state.ctx.clone())
-    });
-    if let Some(ctx) = ctx {
-        theme::follow_windows(&ctx);
-        ctx.request_repaint();
-    }
+    STATE.with_borrow_mut(|state| state.as_mut().map(|s| s.light_taskbar = light));
     update(window, false);
 }
 
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if let Some(from) = ToTray::from_message(message, wparam.0, lparam.0) {
+        from_window(window, from);
+        return LRESULT(0);
+    }
     match message {
         WM_TRAY => {
             match lparam.0 as u32 & 0xffff {
-                WM_LBUTTONUP => tray_click(),
+                WM_LBUTTONUP => to_window(ToWindow::Click),
                 WM_RBUTTONUP | WM_CONTEXTMENU => menu(window),
                 _ => {}
             }
             LRESULT(0)
         }
         WM_OPEN => {
-            open_pinned();
+            to_window(ToWindow::Open);
             LRESULT(0)
         }
         WM_REFRESH => {
             update(window, false);
+            // Only to a window process that is there; none is started.
+            let linked = STATE.with_borrow(|s| s.as_ref().is_some_and(|s| s.window.link.is_some()));
+            if linked && let Some(state) = state_message() {
+                to_window(state);
+            }
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
@@ -582,6 +707,25 @@ mod tests {
 
     use crate::devices::{Battery, Kind, Precision, Reading, Transport};
     use crate::i18n::Lang;
+
+    #[test]
+    fn messages_for_the_window_start_it_only_when_wanted() {
+        let state = ToWindow::State(ipc::Snapshot::new(&[], true, 0));
+        // Running and listening: everything goes.
+        for message in [ToWindow::Click, ToWindow::Open, ToWindow::Quit, state.clone()] {
+            assert_eq!(route(true, true, &message), Route::Send);
+        }
+        // Starting: commands wait for its hello, which brings the state anyway.
+        assert_eq!(route(true, false, &ToWindow::Click), Route::Wait);
+        assert_eq!(route(true, false, &ToWindow::Quit), Route::Wait);
+        assert_eq!(route(true, false, &state), Route::Drop);
+        // Not running: a click opens the flyout, Open the pinned window, and
+        // a poll or Quit starts nothing.
+        assert_eq!(route(false, false, &ToWindow::Click), Route::Start(Start::Flyout));
+        assert_eq!(route(false, false, &ToWindow::Open), Route::Start(Start::Pinned));
+        assert_eq!(route(false, false, &state), Route::Drop);
+        assert_eq!(route(false, false, &ToWindow::Quit), Route::Drop);
+    }
 
     #[test]
     fn text_is_cut_to_the_field_and_terminated() {

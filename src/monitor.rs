@@ -28,7 +28,10 @@ pub struct Shared {
     /// Notifications waiting for the tray to show them.
     pub pending: Vec<Notice>,
     pub history: History,
-    /// Whether the window is hidden, a flyout or pinned.
+    /// Counts the writes of history.json, so the window process knows when
+    /// to read it again.
+    pub history_rev: u64,
+    /// Whether the window is hidden, a flyout or pinned (window process).
     pub window: WindowState,
 }
 
@@ -42,6 +45,7 @@ impl Shared {
             lang,
             pending: Vec::new(),
             history,
+            history_rev: 0,
             window: WindowState::default(),
         }
     }
@@ -87,6 +91,7 @@ pub fn poll(source: &mut dyn Source, shared: &SharedState) {
         }
         if record(&mut state.history, &state.devices, now) {
             history::save(&state.history);
+            state.history_rev += 1;
         }
     }
     state.polled = true;

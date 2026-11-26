@@ -167,7 +167,7 @@ impl Kind {
 }
 
 /// What a connected device said about its battery on the latest poll.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Battery {
     /// Percent, 0-100.
     Level(u8),
@@ -272,6 +272,29 @@ pub struct Device {
 
 fn default_true() -> bool {
     true
+}
+
+/// The part of a `Device` that only the latest poll knows and devices.json
+/// leaves out, for handing a device to the window process (`ipc.rs`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Live {
+    pub connected: bool,
+    pub off_since: u64,
+    pub battery: Battery,
+    pub charging: Option<bool>,
+}
+
+impl Device {
+    pub fn live(&self) -> Live {
+        Live { connected: self.connected, off_since: self.off_since, battery: self.battery, charging: self.charging }
+    }
+
+    pub fn set_live(&mut self, live: Live) {
+        self.connected = live.connected;
+        self.off_since = live.off_since;
+        self.battery = live.battery;
+        self.charging = live.charging;
+    }
 }
 
 /// What to show for a device.

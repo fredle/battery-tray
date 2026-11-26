@@ -1,10 +1,12 @@
 //! The window: a card for each device, the low-battery banner, and a
 //! settings page. It opens as a flyout from the tray or as a pinned window
-//! (`flyout.rs`), and only shows what the monitor thread last found, so it
-//! never waits for a device. Closing it hides it; the app lives on in the
-//! tray (`tray.rs`). The footer with the auto-update toggle and version is
-//! required on every factory app. Colours and type come from `theme.rs`,
-//! the little pictures from `glyphs.rs`.
+//! (`flyout.rs`), and only shows what the tray process's last poll found
+//! (`link.rs`), so it never waits for a device. It runs in a process of its
+//! own, started by the tray process (`tray.rs`) when it is wanted; closing
+//! it hides it, and the process ends a little later. The footer with the
+//! auto-update toggle and version is required on every factory app.
+//! Colours and type come from `theme.rs`, the little pictures from
+//! `glyphs.rs`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -18,11 +20,13 @@ use crate::flyout::{self, Mode};
 use crate::glyphs::{self, Glyph};
 use crate::history::{self, Sample};
 use crate::i18n::{Lang, Strings, fill};
+use crate::ipc::Start;
 use crate::license;
+use crate::link::{self, Link};
 use crate::monitor::{self, Monitor, Shared, SharedState, lock};
 use crate::shots::Shots;
 use crate::theme::{self, Palette};
-use crate::tray::{self, Tray};
+use crate::tray;
 
 /// The made-up scenes of screenshot mode.
 mod scenes;
@@ -30,7 +34,7 @@ mod scenes;
 const APP_NAME: &str = "Battery Tray";
 /// Space between the window edge and its contents.
 const GUTTER: i8 = 12;
-/// Where the window is created when the app starts in the tray.
+/// Where a flyout is drawn the first time, to learn its height.
 const OFF_SCREEN: [f32; 2] = [-20000.0, -20000.0];
 /// The lowest and highest warning level the user can set, in percent.
 const THRESHOLDS: std::ops::RangeInclusive<u8> = 5..=50;
@@ -39,26 +43,55 @@ const GRAPH_SPAN: u64 = 7 * 86_400;
 /// Where "Open taskbar settings" goes.
 const TASKBAR_SETTINGS: &str = "ms-settings:taskbar";
 
+/// The app as it starts: the resident tray process (`tray.rs`), or with
+/// `--ui` the window process, or with `--shots` the screenshot mode.
 pub fn run(args: Vec<String>) -> eframe::Result<()> {
-    let shots = args.iter().any(|a| a == "--shots");
+    if args.iter().any(|a| a == "--shots") {
+        return run_window(args, Start::Pinned, None);
+    }
+    if let Some(start) = Start::from_args(&args) {
+        let shared: SharedState = Arc::new(Mutex::new(Shared::new(Vec::new(), history::History::default(), Rules::default(), Lang::En)));
+        // Without a tray process it is an ordinary window with its own polling.
+        let link = link::find_tray().and_then(|tray| Link::connect(shared.clone(), tray));
+        // A flyout needs a tray to come back from.
+        let start = if link.is_some() { start } else { Start::Pinned };
+        return run_window(args, start, link.map(|l| (l, shared)));
+    }
     // Started by Windows at sign-in: stay in the tray.
-    let in_tray = !shots && args.iter().any(|arg| arg == autostart::TRAY_ARG);
+    let in_tray = args.iter().any(|arg| arg == autostart::TRAY_ARG);
     // One copy is enough. A second start brings the first one's window up,
     // unless it is only Windows starting the app at sign-in.
-    if !shots && tray::running_instance(!in_tray) {
+    if tray::running_instance(!in_tray) {
         return Ok(());
     }
+    if autostart::enabled() {
+        // Keep the entry pointing at this copy if the app has moved.
+        autostart::set(true);
+    }
+    if tray::run(!in_tray) {
+        return Ok(());
+    }
+    // No tray: the window, in this process, and closing it quits.
+    run_window(args, Start::Pinned, None)
+}
+
+/// The window. `link`: the line to the tray process and the state it fills.
+fn run_window(args: Vec<String>, start: Start, link: Option<(Link, SharedState)>) -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_title(APP_NAME)
         .with_inner_size([flyout::WIDTH, flyout::PINNED_HEIGHT])
         .with_decorations(false)
         .with_resizable(false)
         .with_maximize_button(false);
-    // eframe always shows its window after the first frame, so a tray start
-    // opens it off-screen and hides it on the second (see `App::ui`).
-    let viewport = if in_tray { viewport.with_position(OFF_SCREEN) } else { viewport };
+    // eframe shows its window after the first frame: the flyout is drawn
+    // once off-screen to learn its height, then put in the corner (see
+    // `App::ui`), without a taskbar button.
+    let viewport = match start {
+        Start::Flyout => viewport.with_position(OFF_SCREEN).with_taskbar(false),
+        Start::Pinned => viewport,
+    };
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native(APP_NAME, options, Box::new(move |cc| Ok(Box::new(App::new(cc, &args, in_tray)))))
+    eframe::run_native(APP_NAME, options, Box::new(move |cc| Ok(Box::new(App::new(cc, &args, start, link)))))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,14 +106,17 @@ pub struct App {
     /// "What would make this better?" (src/feedback.rs).
     feedback: crate::feedback::Feedback,
     shared: SharedState,
-    /// `None` in screenshot mode.
+    /// Polling in this process: only for a window without a tray process.
     monitor: Option<Monitor>,
-    /// `None` if the tray icon could not be created; closing then quits.
-    tray: Option<Tray>,
+    /// The line to the tray process. `None` without one (and in screenshot
+    /// mode); closing then quits.
+    link: Option<Link>,
     /// The main window's handle.
     window: Option<isize>,
-    /// Frames left until a tray start hides the window; `None` otherwise.
-    hide_in: Option<u8>,
+    /// How the window is to be shown once eframe has drawn it once.
+    start: Option<Start>,
+    /// Frames drawn.
+    frames: u32,
     autostart: bool,
     licensed_to: Option<String>,
     unlock_open: bool,
@@ -118,17 +154,6 @@ fn main_window(cc: &eframe::CreationContext<'_>) -> Option<isize> {
     }
 }
 
-fn rules_for(settings: &crate::settings::Settings, licensed: bool) -> Rules {
-    Rules {
-        threshold: settings.threshold,
-        overrides: settings.thresholds.clone(),
-        tray: settings.tray_list(),
-        licensed,
-        notify_connect: settings.notify_connect,
-        notify_full: settings.notify_full,
-    }
-}
-
 /// The value after `flag` on the command line.
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let at = args.iter().position(|a| a == flag)?;
@@ -136,7 +161,7 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, args: &[String], in_tray: bool) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, args: &[String], start: Start, link: Option<(Link, SharedState)>) -> Self {
         let ctx = &cc.egui_ctx;
         let shots = Shots::from_args(args);
         // Screenshots show the app as a new user first sees it.
@@ -144,7 +169,7 @@ impl App {
         let licensed_to = license::verify(&settings.license_key);
         let lang = match (shots.is_some(), arg_value(args, "--lang")) {
             (true, Some(locale)) => Lang::from_locale(locale),
-            _ => settings.language.unwrap_or_else(Lang::system),
+            _ => settings.lang(),
         };
         theme::apply(ctx);
         theme::install_fonts(ctx, &[lang, Lang::system()]);
@@ -153,44 +178,49 @@ impl App {
             _ => theme::follow_windows(ctx),
         }
 
-        let (saved, history) = if shots.is_some() {
-            (Vec::new(), history::History::default())
-        } else {
-            (devices::load(), history::load())
-        };
-        let shared: SharedState =
-            Arc::new(Mutex::new(Shared::new(saved, history, rules_for(&settings, licensed_to.is_some()), lang)));
         let window = main_window(cc);
-        let tray = if shots.is_some() {
-            None
-        } else {
-            window.and_then(|w| Tray::start(shared.clone(), w, ctx.clone()))
+        let rules = settings.rules(licensed_to.is_some());
+        let (link, shared, monitor) = match link {
+            Some((link, shared)) => {
+                // The devices come from the tray process: usually here by now.
+                link.wait_for_state(std::time::Duration::from_millis(500));
+                {
+                    let mut shared = lock(&shared);
+                    shared.rules = rules;
+                    shared.lang = lang;
+                }
+                if let Some(w) = window {
+                    link.attach(w, ctx.clone());
+                }
+                (Some(link), shared, None)
+            }
+            None if shots.is_some() => {
+                let shared = Arc::new(Mutex::new(Shared::new(Vec::new(), history::History::default(), rules, lang)));
+                (None, shared, None)
+            }
+            None => {
+                // No tray process: poll here.
+                let shared: SharedState = Arc::new(Mutex::new(Shared::new(devices::load(), history::load(), rules, lang)));
+                let repaint = ctx.clone();
+                let monitor = Monitor::start(crate::source::pick(), shared.clone(), move || repaint.request_repaint());
+                (None, shared, Some(monitor))
+            }
         };
-        let hidden = in_tray && tray.is_some();
-        lock(&shared).window.mode = if hidden { Mode::Hidden } else { Mode::Pinned };
-        // Started from the Start menu (or with no tray to open it from): a
-        // pinned window in the middle of the screen.
+        // A flyout is drawn once while hidden, to learn its height, and then
+        // shown; a pinned window is shown as it is.
+        lock(&shared).window.mode = match start {
+            Start::Flyout => Mode::Hidden,
+            Start::Pinned => Mode::Pinned,
+        };
         if let Some(w) = window
             && shots.is_none()
-            && !hidden
+            && start == Start::Pinned
         {
+            // In the middle of the taskbar's screen.
             flyout::centre(w);
         }
-        let monitor = shots.is_none().then(|| {
-            let repaint = ctx.clone();
-            Monitor::start(crate::source::pick(), shared.clone(), move || {
-                if let Some(tray) = tray {
-                    tray.refresh();
-                }
-                repaint.request_repaint();
-            })
-        });
 
         let autostart = shots.is_none() && autostart::enabled();
-        if autostart {
-            // Keep the entry pointing at this copy if the app has moved.
-            autostart::set(true);
-        }
         let mut feedback = crate::feedback::Feedback::default();
         feedback.set_texts(lang.feedback_texts());
         let mut app = Self {
@@ -201,9 +231,10 @@ impl App {
             feedback,
             shared,
             monitor,
-            tray,
+            link,
             window,
-            hide_in: hidden.then_some(1),
+            start: shots.is_none().then_some(start),
+            frames: 0,
             autostart,
             licensed_to,
             unlock_open: false,
@@ -241,7 +272,7 @@ impl App {
     }
 
     fn rules(&self) -> Rules {
-        rules_for(&self.settings, self.licensed())
+        self.settings.rules(self.licensed())
     }
 
     /// Hands the settings the monitor and tray depend on to them.
@@ -251,8 +282,8 @@ impl App {
             shared.rules = self.rules();
             shared.lang = self.lang;
         }
-        if let Some(tray) = self.tray {
-            tray.refresh();
+        if let Some(link) = self.link {
+            link.settings_changed(false);
         }
     }
 
@@ -260,6 +291,9 @@ impl App {
     fn refresh(&self) {
         if let Some(monitor) = &self.monitor {
             monitor.refresh();
+        }
+        if let Some(link) = self.link {
+            link.refresh();
         }
     }
 
@@ -292,6 +326,9 @@ impl App {
             && self.shots.is_none()
         {
             flyout::hide(window);
+        }
+        if let Some(link) = self.link {
+            link.hidden();
         }
     }
 
@@ -330,7 +367,7 @@ impl App {
             };
             ui.label(RichText::new(title).font(FontId::new(18.0, theme::semibold())).color(p.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if mode == Mode::Pinned && (self.tray.is_some() || self.shots.is_some()) {
+                if mode == Mode::Pinned && (self.link.is_some() || self.shots.is_some()) {
                     if glyphs::button(ui, Glyph::Close, p.text, p.control_hover, t.close_window).clicked() {
                         self.hide(false);
                     }
@@ -549,7 +586,7 @@ impl App {
     fn devices_page(&mut self, ui: &mut egui::Ui, p: Palette, devices: &[Device], polled: bool, view: &View) {
         let t = self.t;
         ui.spacing_mut().item_spacing.y = 8.0;
-        if !self.settings.pin_hint_done && (self.tray.is_some() || self.shots.is_some()) {
+        if !self.settings.pin_hint_done && (self.link.is_some() || self.shots.is_some()) {
             self.pin_hint(ui, p);
         }
         self.low_banner(ui, p, devices, &view.rules);
@@ -1031,23 +1068,37 @@ impl eframe::App for App {
         if let Some(scene) = self.shots.as_mut().and_then(|shots| shots.drive(&ctx, scenes::COUNT)) {
             scenes::set_up(self, scene, &ctx);
         }
-        // Closing the window hides it; Quit is in the tray menu.
-        if self.tray.is_some() && ctx.input(|input| input.viewport().close_requested()) {
+        // Closing the window hides it; Quit is in the tray menu. Only a
+        // process on its way out (`link::quitting`) really closes.
+        if self.link.is_some() && !link::quitting() && ctx.input(|input| input.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide(false);
         }
-        // A tray start: the window was created off-screen. Once eframe has
-        // shown it, hide it; the tray puts it in place when it opens it.
-        if let Some(frames) = self.hide_in {
-            if frames == 0 {
-                self.hide_in = None;
-                if let Some(window) = self.window {
-                    flyout::hide(window);
+        // eframe shows the window once it has drawn it: then it is put where
+        // it belongs and brought to the front.
+        self.frames = self.frames.saturating_add(1);
+        if self.start.is_some() {
+            if self.frames >= 2
+                && let (Some(start), Some(w)) = (self.start.take(), self.window)
+            {
+                match start {
+                    Start::Flyout => {
+                        let height = {
+                            let mut shared = lock(&self.shared);
+                            shared.window.mode = Mode::Flyout;
+                            shared.window.shown += 1;
+                            shared.window.height
+                        };
+                        flyout::show_flyout(w, height);
+                    }
+                    Start::Pinned => flyout::raise(w),
                 }
-            } else {
-                self.hide_in = Some(frames - 1);
-                ctx.request_repaint();
             }
+            ctx.request_repaint();
+        }
+        if let Some(link) = self.link {
+            // A half-written note keeps the process from closing while hidden.
+            link.set_busy(self.unlock_open || self.feedback.is_open());
         }
 
         let now = if self.shots.is_some() { scenes::NOW } else { monitor::now() };
@@ -1071,8 +1122,11 @@ impl eframe::App for App {
             let view = View { now, rules: shared.rules.clone(), insights, estimates, graphs };
             (shared.devices.clone(), shared.polled, shared.window, view)
         };
-        // Keeps "5 min ago" moving while the window is open.
-        ctx.request_repaint_after(std::time::Duration::from_secs(30));
+        // Keeps "5 min ago" moving while the window is open; a hidden one
+        // is not woken for it.
+        if window.mode != Mode::Hidden {
+            ctx.request_repaint_after(std::time::Duration::from_secs(30));
+        }
 
         // A fresh show: the flyout has not had the focus yet.
         if window.shown != self.seen_shown {
@@ -1130,7 +1184,7 @@ impl eframe::App for App {
 
         // Esc closes it, unless it is closing a box or a list first.
         let busy = ctx.memory(|m| m.top_modal_layer().is_some()) || egui::Popup::is_any_open(&ctx);
-        if window.mode != Mode::Hidden && self.tray.is_some() && !busy && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if window.mode != Mode::Hidden && self.link.is_some() && !busy && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.hide(false);
         }
 

@@ -156,6 +156,11 @@ impl Feedback {
         }
     }
 
+    /// Whether the box is open with something in it (or on its way).
+    pub fn is_open(&self) -> bool {
+        !matches!(self.state, State::Closed | State::Sent)
+    }
+
     pub fn open(&mut self) {
         if matches!(self.state, State::Closed | State::Sent) {
             if matches!(self.state, State::Sent) {
