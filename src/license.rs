@@ -54,6 +54,17 @@ pub fn warns_about(device: &str, tray_device: Option<&str>, licensed: bool) -> b
     licensed || !paid_tier_enabled() || tray_device == Some(device)
 }
 
+/// How many devices may have a tray icon of their own. Free: one.
+pub fn icon_limit(licensed: bool) -> usize {
+    if licensed || !paid_tier_enabled() { usize::MAX } else { 1 }
+}
+
+/// Whether the battery history graph and the time-left estimate show.
+/// History is recorded either way, so it is there on the day of unlocking.
+pub fn insights(licensed: bool) -> bool {
+    licensed || !paid_tier_enabled()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +131,14 @@ mod tests {
         if let Ok(key) = std::env::var("HWC_LICENSE_KEY") {
             assert_eq!(verify(&key).as_deref(), Some("buyer@example.com"));
         }
+    }
+
+    #[test]
+    fn free_has_one_tray_icon_and_no_insights_and_the_unlock_has_all() {
+        assert_eq!(icon_limit(true), usize::MAX);
+        assert!(insights(true));
+        assert_eq!(icon_limit(false) == 1, paid_tier_enabled());
+        assert_eq!(insights(false), !paid_tier_enabled());
     }
 
     #[test]
