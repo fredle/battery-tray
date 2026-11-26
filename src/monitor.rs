@@ -1,10 +1,19 @@
-//! The background thread that asks the source for battery levels about once
-//! a minute, and the state it shares with the window and the tray. The
-//! window never waits for Bluetooth: it only reads what was last found.
+//! The background thread that asks the source for battery levels, and the
+//! state it shares with the tray (and, in the window process, the state
+//! the tray process sends). The window never waits for Bluetooth: it only
+//! reads what was last found.
+//!
+//! Polls come about once a minute while a device is connected and someone
+//! is at the screen; every five minutes while the session is locked or the
+//! screen is off, or nothing but the PC's own battery is connected; twice
+//! as far apart under battery or energy saver. A device arriving, the PC
+//! waking up, the power status changing or the window opening bring the
+//! next poll forward (`Schedule`). Between polls the thread sleeps without
+//! a timer; it runs at background priority.
 
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::devices::{self, Device, Notice, Rules};
 use crate::flyout::WindowState;
@@ -109,8 +118,126 @@ pub fn record(history: &mut History, devices: &[Device], now: u64) -> bool {
     changed | history.compact(now, |id| devices.iter().any(|d| d.id == id))
 }
 
+/// What Windows says about the PC that changes how often to poll.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Conditions {
+    /// Battery saver (Windows 10) or energy saver (Windows 11) is on.
+    pub saver: bool,
+    /// The session is locked or its screen is off: nobody is looking.
+    pub away: bool,
+}
+
+/// While nobody is looking, or nothing but the PC's own battery is
+/// connected, polls come this far apart at least. A device that connects
+/// meanwhile is noticed at once through `Wake::DevicesChanged`.
+pub const SLOW: Duration = Duration::from_secs(5 * 60);
+/// Windows announces a device before it is ready to say its level.
+pub const SETTLE: Duration = Duration::from_secs(3);
+/// After the PC wakes up, Bluetooth devices take a moment to reconnect.
+pub const AFTER_RESUME: Duration = Duration::from_secs(8);
+
+/// How long after a poll the next one is due. `connected`: some device
+/// other than the PC's own battery is connected.
+pub fn poll_gap(base: Duration, conditions: Conditions, connected: bool) -> Duration {
+    let mut gap = base;
+    if conditions.away || !connected {
+        gap = gap.max(SLOW);
+    }
+    if conditions.saver {
+        gap *= 2;
+    }
+    gap
+}
+
+/// Why the poll thread is woken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// Poll now: Refresh, a change to what gets a warning, the window opened.
+    Now,
+    /// Windows' device list changed: something was plugged in, paired,
+    /// connected or removed.
+    DevicesChanged,
+    /// The power status changed (plugged in, battery level).
+    Power,
+    /// Back from sleep.
+    Resumed,
+    /// Someone opened the window: what it shows should not be older than
+    /// a regular gap.
+    Looked,
+    Conditions(Conditions),
+}
+
+/// When the next poll is due.
+#[derive(Clone, Copy, Debug)]
+pub struct Schedule {
+    pub base: Duration,
+    pub conditions: Conditions,
+    /// Whether the last poll found a device (other than the PC) connected.
+    pub connected: bool,
+    pub last: Option<Instant>,
+    /// A poll asked for sooner than the regular one.
+    pub soon: Option<Instant>,
+}
+
+impl Schedule {
+    pub fn new(base: Duration) -> Schedule {
+        Schedule { base, conditions: Conditions::default(), connected: true, last: None, soon: None }
+    }
+
+    pub fn due(&self) -> Instant {
+        let regular = match self.last {
+            Some(last) => last + poll_gap(self.base, self.conditions, self.connected),
+            None => return Instant::now(),
+        };
+        self.soon.map_or(regular, |soon| soon.min(regular))
+    }
+
+    pub fn polled(&mut self, at: Instant, connected: bool) {
+        self.last = Some(at);
+        self.connected = connected;
+        self.soon = None;
+    }
+
+    fn sooner(&mut self, at: Instant) {
+        self.soon = Some(self.soon.map_or(at, |soon| soon.min(at)));
+    }
+
+    /// Takes a wake into account. Returns true when the device list may
+    /// have changed, so the sources should look again.
+    pub fn woken(&mut self, wake: Wake, now: Instant) -> bool {
+        match wake {
+            Wake::Now => self.sooner(now),
+            Wake::DevicesChanged => {
+                self.sooner(now + SETTLE);
+                return true;
+            }
+            Wake::Power => self.sooner(now + SETTLE),
+            Wake::Looked => {
+                if let Some(last) = self.last {
+                    self.sooner((last + self.base).max(now));
+                }
+            }
+            Wake::Resumed => {
+                self.sooner(now + AFTER_RESUME);
+                return true;
+            }
+            Wake::Conditions(conditions) => {
+                // Back at the screen: the regular gap counts from the last
+                // poll, so a stale level is read again at once.
+                self.conditions = conditions;
+            }
+        }
+        false
+    }
+}
+
+/// Whether any device but the PC's own battery is connected.
+fn any_connected(shared: &SharedState) -> bool {
+    lock(shared).devices.iter().any(|d| d.connected && d.transport != devices::Transport::Internal)
+}
+
 pub struct Monitor {
-    wake: Sender<()>,
+    wake: Sender<Wake>,
 }
 
 impl Monitor {
@@ -121,16 +248,27 @@ impl Monitor {
         changed: impl Fn() + Send + 'static,
     ) -> Monitor {
         let (wake, woken) = channel();
-        let interval = interval();
+        let mut schedule = Schedule::new(interval());
         std::thread::spawn(move || {
+            crate::power::background_thread();
             loop {
-                poll(source.as_mut(), &shared);
-                changed();
-                if woken.recv_timeout(interval) == Err(RecvTimeoutError::Disconnected) {
-                    break;
+                let now = Instant::now();
+                let due = schedule.due();
+                if due <= now {
+                    poll(source.as_mut(), &shared);
+                    schedule.polled(Instant::now(), any_connected(&shared));
+                    changed();
+                    continue;
                 }
-                // Several requests while polling need only one more poll.
-                while woken.try_recv().is_ok() {}
+                match woken.recv_timeout(due - now) {
+                    Ok(wake) => {
+                        if schedule.woken(wake, Instant::now()) {
+                            source.devices_changed();
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
         Monitor { wake }
@@ -138,7 +276,11 @@ impl Monitor {
 
     /// Polls again now: after Refresh, or a change to what gets a warning.
     pub fn refresh(&self) {
-        let _ = self.wake.send(());
+        let _ = self.wake.send(Wake::Now);
+    }
+
+    pub fn wake(&self, wake: Wake) {
+        let _ = self.wake.send(wake);
     }
 }
 
@@ -146,6 +288,64 @@ impl Monitor {
 mod tests {
     use super::*;
     use crate::devices::{Battery, Kind, Reading, State, Transport};
+
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn polls_back_off_when_nobody_looks_or_nothing_is_connected() {
+        let normal = Conditions::default();
+        assert_eq!(poll_gap(MINUTE, normal, true), MINUTE);
+        assert_eq!(poll_gap(MINUTE, normal, false), SLOW);
+        assert_eq!(poll_gap(MINUTE, Conditions { away: true, saver: false }, true), SLOW);
+        assert_eq!(poll_gap(MINUTE, Conditions { away: false, saver: true }, true), 2 * MINUTE);
+        assert_eq!(poll_gap(MINUTE, Conditions { away: true, saver: true }, false), 2 * SLOW);
+        // A short test interval stays short while in use.
+        assert_eq!(poll_gap(Duration::from_secs(2), normal, true), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_first_poll_is_at_once_and_wakes_bring_the_next_forward() {
+        let start = Instant::now();
+        let mut s = Schedule::new(MINUTE);
+        assert!(s.due() <= Instant::now());
+        s.polled(start, true);
+        assert_eq!(s.due(), start + MINUTE);
+
+        // A device arrives: a poll once Windows has settled, and the sources
+        // look for new devices.
+        assert!(s.woken(Wake::DevicesChanged, start + Duration::from_secs(10)));
+        assert_eq!(s.due(), start + Duration::from_secs(10) + SETTLE);
+        // A later request does not push it back; an earlier one wins.
+        assert!(!s.woken(Wake::Power, start + Duration::from_secs(20)));
+        assert_eq!(s.due(), start + Duration::from_secs(10) + SETTLE);
+        assert!(!s.woken(Wake::Now, start + Duration::from_secs(11)));
+        assert_eq!(s.due(), start + Duration::from_secs(11));
+        s.polled(start + Duration::from_secs(11), true);
+        assert_eq!(s.due(), start + Duration::from_secs(11) + MINUTE);
+
+        // Locked for a while: slow polls; unlocked, the next is due a
+        // regular gap after the last, which may already have passed.
+        s.woken(Wake::Conditions(Conditions { away: true, saver: false }), start + Duration::from_secs(12));
+        assert_eq!(s.due(), start + Duration::from_secs(11) + SLOW);
+        s.woken(Wake::Conditions(Conditions::default()), start + Duration::from_secs(200));
+        assert_eq!(s.due(), start + Duration::from_secs(11) + MINUTE);
+
+        // Back from sleep: a poll once Bluetooth has reconnected.
+        assert!(s.woken(Wake::Resumed, start + Duration::from_secs(12)));
+        assert_eq!(s.due(), start + Duration::from_secs(12) + AFTER_RESUME);
+
+        // Nothing connected: slow, until a device arrives.
+        s.polled(start, false);
+        assert_eq!(s.due(), start + SLOW);
+        // Or someone looks: then nothing shown is older than a regular gap.
+        s.woken(Wake::Looked, start + Duration::from_secs(5));
+        assert_eq!(s.due(), start + MINUTE);
+        s.woken(Wake::Looked, start + Duration::from_secs(100));
+        assert_eq!(s.due(), start + MINUTE);
+        s.polled(start, false);
+        s.woken(Wake::Looked, start + Duration::from_secs(100));
+        assert_eq!(s.due(), start + Duration::from_secs(100));
+    }
 
     struct Script(Vec<Option<Vec<Reading>>>);
 

@@ -189,6 +189,18 @@ pub fn choose(heard: &[Heard], model: u16) -> Option<Message> {
     }
 }
 
+/// Whether a scan could find anything: some connected device is Apple's and
+/// could be AirPods or Beats (a known model, or one that is not obviously
+/// a mouse or keyboard). Otherwise the radio is left alone.
+pub fn wanted(readings: &[Reading]) -> bool {
+    readings.iter().any(|r| match r.hardware {
+        Some((APPLE, product)) if r.connected => {
+            model_name(product).is_some() || !matches!(r.kind, Kind::Mouse | Kind::Keyboard | Kind::Gamepad)
+        }
+        _ => false,
+    })
+}
+
 /// Puts AirPods levels on the paired devices, keeping each for `KEEP`.
 #[derive(Default)]
 pub struct Airpods {
@@ -459,6 +471,25 @@ mod tests {
         let mut readings = vec![paired("pro", 0x200e, true)];
         airpods.attach(&mut readings, &[], t0 + KEEP + Duration::from_secs(61));
         assert_eq!(readings[0].battery, Battery::NotReported);
+    }
+
+    #[test]
+    fn the_radio_listens_only_while_apple_audio_is_connected() {
+        let apple = |product, kind, connected| Reading {
+            hardware: Some((APPLE, product)),
+            connected,
+            ..Reading::new("a", "x", kind, Transport::Bluetooth)
+        };
+        let other = Reading { hardware: Some((0x054c, 0x0cd3)), ..Reading::new("s", "Sony", Kind::Headphones, Transport::Bluetooth) };
+        assert!(!wanted(&[]));
+        assert!(!wanted(std::slice::from_ref(&other)));
+        assert!(wanted(&[other.clone(), apple(0x2014, Kind::Other, true)]));
+        // Paired but off.
+        assert!(!wanted(&[apple(0x2014, Kind::Headphones, false)]));
+        // A model not in the table yet, as headphones: worth a listen.
+        assert!(wanted(&[apple(0x2099, Kind::Headphones, true)]));
+        // A Magic Mouse or Keyboard is not.
+        assert!(!wanted(&[apple(0x0269, Kind::Mouse, true), apple(0x0267, Kind::Keyboard, true)]));
     }
 
     #[test]

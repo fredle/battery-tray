@@ -25,6 +25,7 @@ mod monitor;
 mod power;
 mod settings;
 mod shots;
+mod signals;
 mod sony;
 mod source;
 mod theme;

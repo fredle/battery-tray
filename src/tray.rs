@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, IsWindow, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
+    WM_LBUTTONUP, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -38,7 +38,8 @@ use crate::devices::{self, Device, Notice, NoticeKind, Rules, State as DeviceSta
 use crate::i18n::{Strings, fill};
 use crate::icon::{self, Look, Spec, Tone};
 use crate::ipc::{self, Start, ToTray, ToWindow};
-use crate::monitor::{Monitor, Shared, SharedState, lock};
+use crate::monitor::{Monitor, Shared, SharedState, Wake, lock};
+use crate::signals::Event;
 use crate::theme;
 
 /// Also how a second copy of the app, and the window process, find it.
@@ -70,6 +71,7 @@ struct State {
     taskbar_created: u32,
     light_taskbar: bool,
     window: WindowProcess,
+    signals: crate::signals::Signals,
 }
 
 thread_local! {
@@ -234,8 +236,13 @@ pub fn run(open: bool) -> bool {
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             light_taskbar: theme::taskbar_light(),
             window: WindowProcess::default(),
+            signals: crate::signals::Signals::default(),
         });
     });
+    // Polling waits for devices to change and backs off while nobody looks;
+    // what is left runs in efficiency mode.
+    crate::signals::register(window);
+    crate::power::efficiency_mode(true);
     update(window, true);
     if open {
         to_window(ToWindow::Open);
@@ -278,6 +285,8 @@ fn state_message() -> Option<ToWindow> {
 fn from_window(window: HWND, message: ToTray) {
     match message {
         ToTray::Hello(link) => {
+            // What the window shows should not be older than a regular poll.
+            STATE.with_borrow(|s| s.as_ref().map(|s| s.monitor.wake(Wake::Looked)));
             let Some(state) = state_message() else { return };
             let Some(mut process) = STATE.with_borrow_mut(|s| s.as_mut().map(|s| std::mem::take(&mut s.window))) else { return };
             process.hello(link, state);
@@ -641,6 +650,22 @@ fn quit(window: HWND) {
     std::process::exit(0);
 }
 
+/// Something Windows said that changes when to poll.
+fn on_signal(event: Event) {
+    STATE.with_borrow_mut(|s| {
+        let Some(s) = s.as_mut() else { return };
+        match event {
+            Event::Wake(wake) => s.monitor.wake(wake),
+            Event::Suspending => {}
+            Event::Changed(signal) => {
+                if let Some(conditions) = s.signals.apply(signal) {
+                    s.monitor.wake(Wake::Conditions(conditions));
+                }
+            }
+        }
+    });
+}
+
 /// Windows' light/dark setting changed: recolour the icons for the
 /// taskbar. (The window process follows it by itself.)
 fn theme_changed(window: HWND) {
@@ -653,6 +678,13 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
     if let Some(from) = ToTray::from_message(message, wparam.0, lparam.0) {
         from_window(window, from);
         return LRESULT(0);
+    }
+    if let Some(event) = crate::signals::event(message, wparam, lparam) {
+        on_signal(event);
+        if message == WM_POWERBROADCAST {
+            return LRESULT(1);
+        }
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
     }
     match message {
         WM_TRAY => {

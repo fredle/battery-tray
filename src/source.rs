@@ -63,6 +63,10 @@ pub trait Source: Send {
     /// Every device, or `None` if the list could not be read this time
     /// (what is already known is then kept as it is).
     fn read(&mut self) -> Option<Vec<Reading>>;
+
+    /// Windows' device list changed: look for devices again on the next
+    /// read instead of trusting what was found before.
+    fn devices_changed(&mut self) {}
 }
 
 /// The simulated source if `BT_FAKE_DEVICES` is set, otherwise Windows.
@@ -73,15 +77,26 @@ pub fn pick() -> Box<dyn Source> {
     }
 }
 
-/// How long AirPods advertisements are listened for on each poll. They
-/// advertise several times a second while out of the case, so a few seconds
-/// is plenty; the rest of the minute the radio is not scanning.
+/// How long AirPods advertisements are listened for on each poll, and only
+/// while an Apple audio device is connected. They advertise several times
+/// a second while out of the case, so a few seconds is plenty; the rest of
+/// the minute the radio is not scanning.
 const SCAN_WINDOW: Duration = Duration::from_secs(3);
 
 /// After this many failed reads in a row with nothing to fall back on, the
 /// Bluetooth list is treated as empty so the other sources still show (a
 /// PC whose Bluetooth is off or missing).
 const BLUETOOTH_GIVE_UP: u32 = 3;
+
+/// Sources that only find devices that are plugged in or paired (HID,
+/// XInput) look again when Windows says the device list changed, and
+/// otherwise this often in case a change went unannounced.
+pub const LOOK_AGAIN: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a source that found nothing last time needs asking now.
+pub fn look_again(found_before: bool, changed: bool, last_look: Option<Instant>, now: Instant) -> bool {
+    found_before || changed || last_look.is_none_or(|at| now.duration_since(at) >= LOOK_AGAIN)
+}
 
 /// Every source on this PC, merged.
 #[derive(Default)]
@@ -91,14 +106,21 @@ pub struct Composite {
     hid: crate::hid::Hid,
     hid_last: Option<Vec<Reading>>,
     airpods: crate::airpods::Airpods,
+    /// The device list changed since the last read.
+    changed: bool,
+    /// XInput: whether it found a controller last time, and when it last looked.
+    pads_found: bool,
+    pads_looked: Option<Instant>,
 }
 
 impl Source for Composite {
-    fn read(&mut self) -> Option<Vec<Reading>> {
-        let started = Instant::now();
-        // Listen while the other sources are asked.
-        let scan = crate::airpods::Scan::start();
+    fn devices_changed(&mut self) {
+        self.changed = true;
+        self.hid.devices_changed();
+    }
 
+    fn read(&mut self) -> Option<Vec<Reading>> {
+        let changed = std::mem::take(&mut self.changed);
         let bluetooth = crate::bluetooth::Windows.read();
         if bluetooth.is_some() {
             self.bluetooth_failures = 0;
@@ -106,8 +128,23 @@ impl Source for Composite {
             self.bluetooth_failures += 1;
         }
         let bluetooth = keep_last(&mut self.bluetooth, bluetooth);
+        // Listen while the other sources are asked, if there is anything to
+        // listen for.
+        let started = Instant::now();
+        let scan = bluetooth
+            .as_deref()
+            .is_some_and(crate::airpods::wanted)
+            .then(crate::airpods::Scan::start)
+            .flatten();
         let hid = keep_last(&mut self.hid_last, self.hid.read());
-        let pads = crate::xinput::read();
+        let pads = if look_again(self.pads_found, changed, self.pads_looked, started) {
+            self.pads_looked = Some(started);
+            let pads = crate::xinput::read();
+            self.pads_found = !pads.is_empty();
+            pads
+        } else {
+            Vec::new()
+        };
         let power = crate::power::read();
 
         let adverts = match scan {
@@ -384,6 +421,20 @@ mod tests {
         }
         println!("xinput: {:?}", crate::xinput::read());
         println!("power: {:?}", crate::power::read());
+    }
+
+    #[test]
+    fn a_source_that_found_nothing_waits_for_a_device_change() {
+        let now = Instant::now();
+        // Never looked: look.
+        assert!(look_again(false, false, None, now));
+        // Found something last time: keep reading it.
+        assert!(look_again(true, false, Some(now), now));
+        // Found nothing a minute ago, nothing changed: skip.
+        assert!(!look_again(false, false, Some(now), now + Duration::from_secs(60)));
+        // Windows says the list changed, or it has been a while: look.
+        assert!(look_again(false, true, Some(now), now + Duration::from_secs(60)));
+        assert!(look_again(false, false, Some(now), now + LOOK_AGAIN));
     }
 
     #[test]

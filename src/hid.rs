@@ -331,18 +331,35 @@ pub fn read_any(devices: &mut [&mut Device], deadline: Instant) -> Option<(usize
 }
 
 /// The HID sources together: one pass over the HID devices per poll, with
-/// one time budget shared by all of them.
+/// one time budget shared by all of them. The list of collections is only
+/// made again when Windows says devices changed (or every
+/// `source::LOOK_AGAIN`), so a PC without a Logitech or PlayStation device
+/// does no HID work at all between changes.
 #[derive(Default)]
 pub struct Hid {
     logitech: crate::hidpp::Logitech,
+    infos: Vec<Info>,
+    listed: Option<Instant>,
+    changed: bool,
 }
 
 impl Hid {
+    pub fn devices_changed(&mut self) {
+        self.changed = true;
+    }
+
     pub fn read(&mut self) -> Option<Vec<Reading>> {
-        let deadline = Instant::now() + BUDGET;
-        let infos = list(&[crate::hidpp::VENDOR, crate::sony::VENDOR]);
-        let mut readings = crate::sony::read(&infos, deadline);
-        readings.extend(self.logitech.read(&infos, deadline));
+        let now = Instant::now();
+        if self.listed.is_none() || std::mem::take(&mut self.changed) || self.listed.is_some_and(|at| now.duration_since(at) >= crate::source::LOOK_AGAIN) {
+            self.infos = list(&[crate::hidpp::VENDOR, crate::sony::VENDOR]);
+            self.listed = Some(now);
+        }
+        if self.infos.is_empty() {
+            return Some(Vec::new());
+        }
+        let deadline = now + BUDGET;
+        let mut readings = crate::sony::read(&self.infos, deadline);
+        readings.extend(self.logitech.read(&self.infos, deadline));
         Some(readings)
     }
 }

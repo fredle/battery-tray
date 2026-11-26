@@ -32,6 +32,38 @@ pub fn from_status(ac_line: u8, flag: u8, percent: u8, name: &str) -> Option<Rea
     })
 }
 
+/// Asks Windows to run this process in efficiency mode (EcoQoS: slower,
+/// on efficient cores) or, with `false`, to never throttle it. The tray
+/// process only waits and polls; the window process must feel instant.
+pub fn efficiency_mode(on: bool) {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: if on { PROCESS_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+    };
+    unsafe {
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+/// Puts the calling thread in background mode: low CPU, I/O and memory
+/// priority, for the poll thread.
+pub fn background_thread() {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
 /// This PC's name as the user sees it in Settings.
 fn computer_name() -> String {
     use windows::Win32::System::SystemInformation::{ComputerNamePhysicalDnsHostname, GetComputerNameExW};
