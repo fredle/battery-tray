@@ -50,6 +50,9 @@ pub fn run(args: Vec<String>) -> eframe::Result<()> {
         return run_window(args, Start::Pinned, None);
     }
     if let Some(start) = Start::from_args(&args) {
+        // Started by the tray process, which runs in efficiency mode: the
+        // window must not inherit it.
+        crate::power::efficiency_mode(false);
         let shared: SharedState = Arc::new(Mutex::new(Shared::new(Vec::new(), history::History::default(), Rules::default(), Lang::En)));
         // Without a tray process it is an ordinary window with its own polling.
         let link = link::find_tray().and_then(|tray| Link::connect(shared.clone(), tray));

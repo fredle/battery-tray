@@ -90,13 +90,17 @@ impl Link {
         let (sender, receiver) = channel();
         std::thread::spawn(move || unsafe {
             let window = create_window();
+            if window.is_some() {
+                // Before anyone knows the window: the tray's first message
+                // must find the state.
+                STATE.with_borrow_mut(|state| {
+                    *state = Some(State { shared, tray, main: None, inbox: Vec::new(), history_rev: None, hide_checks: 0 });
+                });
+            }
             let _ = sender.send(window.map(|w| w.0 as isize));
             if window.is_none() {
                 return;
             }
-            STATE.with_borrow_mut(|state| {
-                *state = Some(State { shared, tray, main: None, inbox: Vec::new(), history_rev: None, hide_checks: 0 });
-            });
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&message);
