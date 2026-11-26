@@ -13,7 +13,7 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, Rect, RichText, Sense, 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::autostart;
-use crate::devices::{self, Ago, Device, Kind, Part, PartKind, Precision, Rules, State};
+use crate::devices::{self, Ago, Device, Kind, Part, PartKind, Precision, Rules, State, Transport};
 use crate::flyout::{self, Mode};
 use crate::glyphs::{self, Glyph};
 use crate::history::{self, Sample};
@@ -106,6 +106,9 @@ pub struct App {
     shots: Option<Shots>,
     /// Screenshot mode: the scene shows the flyout, sized to its content.
     shot_flyout: bool,
+    /// The flyout height last asked of Windows, and for which show.
+    asked_height: f32,
+    asked_for_show: u32,
 }
 
 fn main_window(cc: &eframe::CreationContext<'_>) -> Option<isize> {
@@ -215,6 +218,8 @@ impl App {
             styled_dark: None,
             shots,
             shot_flyout: false,
+            asked_height: 0.0,
+            asked_for_show: 0,
         };
         if app.shots.is_some() {
             app.version = env!("CARGO_PKG_VERSION").to_owned();
@@ -893,11 +898,17 @@ pub fn time_left_text(secs: u64, t: &Strings) -> String {
 fn status_text(device: &Device, now: u64, estimate: Option<u64>, t: &Strings) -> String {
     let transport = devices::transport_text(device.transport, t);
     match device.state() {
-        State::Live(_) if device.is_charging() => format!("{} · {transport}", capitalise(t.charging)),
-        State::Live(_) => match estimate {
-            Some(secs) => format!("{transport} · {}", time_left_text(secs, t)),
-            None => transport.to_owned(),
-        },
+        State::Live(_) => {
+            let charging = device.is_charging();
+            let detail = if charging { Some(capitalise(t.charging)) } else { estimate.map(|secs| time_left_text(secs, t)) };
+            match detail {
+                // The laptop's "This PC" says nothing its name does not.
+                Some(detail) if device.transport == Transport::Internal => detail,
+                Some(detail) if charging => format!("{detail} · {transport}"),
+                Some(detail) => format!("{transport} · {detail}"),
+                None => transport.to_owned(),
+            }
+        }
         State::NotReported => format!("{transport} · {}", t.no_report),
         State::Unreadable => t.unreadable.to_owned(),
         State::Off(Some((level, seen))) => {
@@ -1134,7 +1145,12 @@ impl eframe::App for App {
                 }
             } else if window.mode == Mode::Flyout
                 && let Some(w) = self.window
+                && (self.asked_height != wanted || window.shown != self.asked_for_show)
             {
+                // Asked once per height: if the screen is too short for it,
+                // asking again every frame would change nothing.
+                self.asked_height = wanted;
+                self.asked_for_show = window.shown;
                 flyout::resize_flyout(w, wanted);
             }
         }
@@ -1150,7 +1166,7 @@ impl eframe::App for App {
 mod tests {
     use super::*;
 
-    use crate::devices::{Battery, Reading, Transport};
+    use crate::devices::{Battery, Reading};
 
     /// A device in a given state, through the same path a poll takes.
     fn device(reading: Reading, before: Option<(u8, u64)>) -> Device {
@@ -1177,7 +1193,10 @@ mod tests {
         assert_eq!(status(device(reading(Transport::Le, true, Battery::Level(80)), None), 0), "Bluetooth LE");
         assert_eq!(status(device(reading(Transport::Receiver, true, Battery::Level(80)), None), 0), "USB receiver");
         let charging = Reading { charging: Some(true), ..reading(Transport::Internal, true, Battery::Level(40)) };
-        assert_eq!(status(device(charging, None), 0), "Charging · This PC");
+        assert_eq!(status(device(charging, None), 0), "Charging");
+        let usb = Reading { charging: Some(true), ..reading(Transport::Usb, true, Battery::Level(40)) };
+        assert_eq!(status(device(usb, None), 0), "Charging · USB");
+        assert_eq!(status(device(reading(Transport::Internal, true, Battery::Level(40)), None), 0), "This PC");
         assert_eq!(
             status(device(reading(Transport::Bluetooth, true, Battery::NotReported), None), 0),
             "Bluetooth · Doesn't report its battery level"
