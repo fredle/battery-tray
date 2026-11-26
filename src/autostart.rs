@@ -59,9 +59,23 @@ pub fn set(on: bool) {
     }
 }
 
+/// Whether to switch "Start with Windows" on without being asked: once,
+/// on an installed copy (not a build run from a source tree). After that
+/// the tick box decides, so switching it off stays off.
+pub fn default_on_now(offered: bool, installed: bool) -> bool {
+    !offered && installed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_by_default_once_and_only_when_installed() {
+        assert!(default_on_now(false, true));
+        assert!(!default_on_now(true, true));
+        assert!(!default_on_now(false, false));
+    }
 
     #[test]
     fn command_quotes_the_path_and_starts_in_the_tray() {

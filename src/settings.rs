@@ -38,6 +38,10 @@ pub struct Settings {
     /// The hint about Windows hiding new tray icons was dismissed.
     #[serde(default)]
     pub pin_hint_done: bool,
+    /// "Start with Windows" has been switched on once by default; from
+    /// then on the Run key is the user's to keep or remove.
+    #[serde(default)]
+    pub autostart_offered: bool,
     /// The licence key as pasted; verified on every start.
     #[serde(default)]
     pub license_key: String,
@@ -66,6 +70,7 @@ impl Default for Settings {
             notify_connect: true,
             notify_full: false,
             pin_hint_done: false,
+            autostart_offered: false,
             license_key: String::new(),
             language: None,
         }

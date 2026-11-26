@@ -69,7 +69,15 @@ pub fn run(args: Vec<String>) -> eframe::Result<()> {
     if tray::running_instance(!in_tray) {
         return Ok(());
     }
-    if autostart::enabled() {
+    // On by default: a battery warning is no use from an app that is not
+    // running. Done once; the tick box in settings decides from then on.
+    let installed = !crate::update::current_version().ends_with("(dev)");
+    let mut settings = crate::settings::load();
+    if autostart::default_on_now(settings.autostart_offered, installed) {
+        autostart::set(true);
+        settings.autostart_offered = true;
+        crate::settings::save(&settings);
+    } else if autostart::enabled() {
         // Keep the entry pointing at this copy if the app has moved.
         autostart::set(true);
     }
