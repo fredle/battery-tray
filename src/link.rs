@@ -366,6 +366,9 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
                 }
                 if hidden {
                     flyout::hide(main);
+                    // The lock is free again before Windows calls into the window.
+                    let height = lock(&shared).window.height;
+                    flyout::prepare(main, height);
                     linger(window, &shared);
                 }
             }

@@ -219,6 +219,18 @@ fn bring_up(window: HWND) {
     }
 }
 
+/// Does the slow part of showing the (hidden) window as the flyout ahead of
+/// time, for a window made ready before the click: COM's taskbar list, and
+/// moving and sizing it into the corner, which may rescale it for another
+/// monitor. Call from the thread that will show it.
+pub fn prepare(window: isize, height: f32) {
+    let window = hwnd(window);
+    let (work, dpi, edge) = taskbar_monitor();
+    let size = (px(WIDTH, dpi), px(height.clamp(MIN_HEIGHT, MAX_HEIGHT), dpi));
+    place(window, flyout_rect(work, edge, size, px(MARGIN, dpi)), true);
+    set_taskbar_button(window, false);
+}
+
 /// Opens the window as the flyout, `height` points tall.
 pub fn show_flyout(window: isize, height: f32) {
     let window = hwnd(window);
