@@ -208,11 +208,20 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+/// Whether some text (a device name) needs Windows' symbol font: arrows,
+/// dingbats, emoji. Segoe UI has every letter the app's own texts use.
+pub fn needs_symbols<'a>(texts: impl IntoIterator<Item = &'a str>) -> bool {
+    texts
+        .into_iter()
+        .any(|text| text.chars().any(|c| matches!(c as u32, 0x2190..=0x2BFF | 0x1F000..=0x1FAFF)))
+}
+
 /// Uses Windows' Segoe UI for the interface, so the app looks at home, and
 /// adds Windows' East Asian fonts for the display language and Windows'
-/// language (so device names in the user's script show too). egui's built-in
-/// fonts stay as the fallback and supply the symbols.
-pub fn install_fonts(ctx: &egui::Context, languages: &[Lang]) {
+/// language (so device names in the user's script show too), and Segoe UI
+/// Symbol when `symbols` (see `needs_symbols`). No font is built into the
+/// exe: Windows has them all, and only those needed are read.
+pub fn install_fonts(ctx: &egui::Context, languages: &[Lang], symbols: bool) {
     let fonts_dir = PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()))
         .join("Fonts");
     let mut fonts = egui::FontDefinitions::default();
@@ -237,8 +246,9 @@ pub fn install_fonts(ctx: &egui::Context, languages: &[Lang]) {
         .cloned()
         .unwrap_or_default();
     let mut regular = proportional.clone();
-    if add(&mut fonts, "segoeui.ttf", 0.0) {
-        regular.insert(0, "segoeui.ttf".to_owned());
+    // Segoe UI is on every Windows 10 and 11; the others only in case.
+    if let Some(file) = ["segoeui.ttf", "arial.ttf", "tahoma.ttf"].into_iter().find(|f| add(&mut fonts, f, 0.0)) {
+        regular.insert(0, file.to_owned());
     }
     let mut strong = regular.clone();
     if add(&mut fonts, "seguisb.ttf", 0.0) {
@@ -257,13 +267,14 @@ pub fn install_fonts(ctx: &egui::Context, languages: &[Lang]) {
                     list.push((*file).to_owned());
                 }
             }
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .push((*file).to_owned());
         }
     }
+    if symbols && add(&mut fonts, "seguisym.ttf", 0.0) {
+        regular.push("seguisym.ttf".to_owned());
+        strong.push("seguisym.ttf".to_owned());
+    }
+    // Nothing in the app is set in a fixed-width face, but egui wants one.
+    fonts.families.insert(FontFamily::Monospace, regular.clone());
     fonts.families.insert(FontFamily::Proportional, regular);
     fonts.families.insert(semibold(), strong);
     ctx.set_fonts(fonts);
@@ -302,4 +313,17 @@ pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: impl Into<egui::Wid
         ui.checkbox(checked, text)
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_names_with_symbols_or_emoji_load_the_symbol_font() {
+        assert!(!needs_symbols(["WH-1000XM4", "Clavier de Zoé", "Наушники", "エアーポッズ", "Mouse – “Work”…"]));
+        assert!(needs_symbols(["Fred's 🎧"]));
+        assert!(needs_symbols(["Keys", "★ Pad"]));
+        assert!(!needs_symbols(std::iter::empty::<&str>()));
+    }
 }

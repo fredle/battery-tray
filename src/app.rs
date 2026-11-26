@@ -142,6 +142,8 @@ pub struct App {
     shots: Option<Shots>,
     /// Screenshot mode: the scene shows the flyout, sized to its content.
     shot_flyout: bool,
+    /// Windows' symbol font is loaded, for a device name that needs it.
+    symbols: bool,
     /// The flyout height last asked of Windows, and for which show.
     asked_height: f32,
     asked_for_show: u32,
@@ -172,7 +174,6 @@ impl App {
             _ => settings.lang(),
         };
         theme::apply(ctx);
-        theme::install_fonts(ctx, &[lang, Lang::system()]);
         match crate::shots::theme_from_args(args) {
             Some(theme) if shots.is_some() => ctx.set_theme(theme),
             _ => theme::follow_windows(ctx),
@@ -216,6 +217,8 @@ impl App {
             // In the middle of the taskbar's screen.
             flyout::centre(w);
         }
+        let symbols = theme::needs_symbols(lock(&shared).devices.iter().map(|d| d.name.as_str()));
+        theme::install_fonts(ctx, &[lang, Lang::system()], symbols);
 
         let autostart = shots.is_none() && autostart::enabled();
         let mut feedback = crate::feedback::Feedback::default();
@@ -246,6 +249,7 @@ impl App {
             styled_dark: None,
             shots,
             shot_flyout: false,
+            symbols,
             asked_height: 0.0,
             asked_for_show: 0,
         };
@@ -299,7 +303,7 @@ impl App {
         self.lang = lang;
         self.t = lang.strings();
         self.key_message = None;
-        theme::install_fonts(ctx, &[lang, Lang::system()]);
+        theme::install_fonts(ctx, &[lang, Lang::system()], self.symbols);
         self.settings.language = Some(lang);
         self.save();
         self.share_settings();
@@ -1108,6 +1112,11 @@ impl eframe::App for App {
             let view = View { now, rules: shared.rules.clone(), insights, estimates, graphs };
             (shared.devices.clone(), shared.polled, shared.window, view)
         };
+        // A device whose name needs the symbol font paired while open.
+        if !self.symbols && theme::needs_symbols(devices.iter().map(|d| d.name.as_str())) {
+            self.symbols = true;
+            theme::install_fonts(&ctx, &[self.lang, Lang::system()], true);
+        }
         // Keeps "5 min ago" moving while the window is open; a hidden one
         // is not woken for it.
         if window.mode != Mode::Hidden {
