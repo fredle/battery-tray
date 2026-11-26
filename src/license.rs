@@ -21,8 +21,13 @@ const PUBLIC_KEY: &str = "o3lBokDFPWGWAa_lv5C6p3hpGni7FrnTwCNP13rk0fc";
 
 const PREFIX: &str = "BTT1";
 
+/// The paywall's switch. Off for now: everything is free, and the unlock,
+/// its button and its notes are not shown. Keys people already bought
+/// still verify, so turning this back on restores their unlock.
+const PAID_TIER: bool = false;
+
 pub fn paid_tier_enabled() -> bool {
-    !BUY_URL.is_empty()
+    PAID_TIER && !BUY_URL.is_empty()
 }
 
 /// Returns the licensed email if `key` is genuine.
