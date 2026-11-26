@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Battery Tray icon: a battery sending a signal. Colours: tile #3C78FF to #2556D9, glyph #FFFFFF, outer arc #C4D8FF -->
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3C78FF"/><stop offset="1" stop-color="#2556D9"/></linearGradient></defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)"/>
+  <g transform="translate(128 128) scale(0.84) translate(-128 -128) translate(3 0)">
+    <rect x="24" y="80" width="128" height="96" rx="18" fill="none" stroke="#FFFFFF" stroke-width="16"/>
+    <rect x="40" y="96" width="52" height="64" rx="8" fill="#FFFFFF"/>
+    <rect x="152" y="104" width="24" height="48" rx="8" fill="#FFFFFF"/>
+    <g fill="none" stroke-linecap="round" stroke-width="14">
+      <path d="M188 106.6 A28 28 0 0 1 188 149.4" stroke="#FFFFFF"/>
+      <path d="M206 85.1 A56 56 0 0 1 206 170.9" stroke="#C4D8FF"/>
+    </g>
+  </g>
+</svg>
