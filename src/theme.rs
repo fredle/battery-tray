@@ -12,9 +12,9 @@ use eframe::egui::{
 use crate::i18n::Lang;
 
 /// Corner radius of cards.
-pub const CARD_RADIUS: u8 = 12;
+pub const CARD_RADIUS: u8 = 8;
 /// Corner radius of buttons and inputs.
-pub const CONTROL_RADIUS: u8 = 8;
+pub const CONTROL_RADIUS: u8 = 5;
 
 /// Font family for headings and the main button. Always defined; it falls
 /// back to the regular face when Segoe UI Semibold is missing.
@@ -46,39 +46,84 @@ pub struct Palette {
     pub error: Color32,
 }
 
+// Windows 11's own flyout colours, with the app's blue as the accent
+// (lighter on dark, as Windows does with its accent).
 const LIGHT: Palette = Palette {
-    bg: Color32::from_rgb(244, 245, 248),
-    surface: Color32::from_rgb(255, 255, 255),
-    border: Color32::from_rgb(225, 228, 234),
-    text: Color32::from_rgb(24, 28, 37),
-    muted: Color32::from_rgb(104, 112, 126),
-    accent: Color32::from_rgb(47, 107, 255),
+    bg: Color32::from_rgb(243, 243, 243),
+    surface: Color32::from_rgb(251, 251, 251),
+    border: Color32::from_rgb(229, 229, 229),
+    text: Color32::from_rgb(27, 27, 27),
+    muted: Color32::from_rgb(96, 96, 96),
+    accent: Color32::from_rgb(37, 86, 217),
     on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(232, 239, 255),
+    accent_soft: Color32::from_rgb(230, 238, 255),
     control: Color32::from_rgb(255, 255, 255),
-    control_hover: Color32::from_rgb(236, 239, 245),
-    track: Color32::from_rgb(221, 226, 236),
-    success: Color32::from_rgb(24, 148, 82),
-    warn: Color32::from_rgb(176, 112, 16),
-    error: Color32::from_rgb(207, 58, 58),
+    control_hover: Color32::from_rgb(240, 240, 240),
+    track: Color32::from_rgb(222, 222, 222),
+    success: Color32::from_rgb(15, 123, 15),
+    warn: Color32::from_rgb(157, 93, 0),
+    error: Color32::from_rgb(196, 43, 28),
 };
 
 const DARK: Palette = Palette {
-    bg: Color32::from_rgb(21, 23, 28),
-    surface: Color32::from_rgb(30, 33, 40),
-    border: Color32::from_rgb(47, 51, 61),
-    text: Color32::from_rgb(232, 234, 239),
-    muted: Color32::from_rgb(150, 157, 170),
-    accent: Color32::from_rgb(86, 136, 255),
-    on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(36, 48, 78),
-    control: Color32::from_rgb(38, 42, 51),
-    control_hover: Color32::from_rgb(48, 53, 64),
-    track: Color32::from_rgb(62, 68, 82),
-    success: Color32::from_rgb(70, 190, 124),
-    warn: Color32::from_rgb(226, 170, 76),
-    error: Color32::from_rgb(240, 110, 110),
+    bg: Color32::from_rgb(32, 32, 32),
+    surface: Color32::from_rgb(43, 43, 43),
+    border: Color32::from_rgb(58, 58, 58),
+    text: Color32::from_rgb(255, 255, 255),
+    muted: Color32::from_rgb(170, 170, 170),
+    accent: Color32::from_rgb(122, 162, 255),
+    on_accent: Color32::from_rgb(16, 24, 48),
+    accent_soft: Color32::from_rgb(44, 52, 74),
+    control: Color32::from_rgb(55, 55, 55),
+    control_hover: Color32::from_rgb(65, 65, 65),
+    track: Color32::from_rgb(72, 72, 72),
+    success: Color32::from_rgb(108, 203, 95),
+    warn: Color32::from_rgb(252, 200, 90),
+    error: Color32::from_rgb(255, 153, 164),
 };
+
+/// A value under HKCU's Personalize key: 1 for light, 0 for dark.
+fn personalize(value: windows::core::PCWSTR) -> Option<bool> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let mut data = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let found = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            value,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut data).cast()),
+            Some(&mut size),
+        ) == ERROR_SUCCESS
+    };
+    found.then_some(data != 0)
+}
+
+/// Whether Windows shows apps light (Settings > Personalisation > Colours).
+pub fn apps_light() -> bool {
+    personalize(windows::core::w!("AppsUseLightTheme")).unwrap_or(true)
+}
+
+/// Whether the taskbar is light, for the tray icons' colour. Windows 10's
+/// taskbar is dark unless set otherwise.
+pub fn taskbar_light() -> bool {
+    personalize(windows::core::w!("SystemUsesLightTheme")).unwrap_or(false)
+}
+
+/// Follows Windows' light or dark setting for apps, unless `HWC_THEME`
+/// (light or dark) says otherwise, for checking both looks.
+pub fn follow_windows(ctx: &egui::Context) {
+    let theme = match std::env::var("HWC_THEME").as_deref() {
+        Ok("dark") => Theme::Dark,
+        Ok("light") => Theme::Light,
+        _ if apps_light() => Theme::Light,
+        _ => Theme::Dark,
+    };
+    ctx.set_theme(theme);
+}
 
 pub fn palette(ctx: &egui::Context) -> Palette {
     match ctx.theme() {
@@ -244,19 +289,6 @@ pub fn primary_button<'a>(p: Palette, text: impl Into<String>, enabled: bool) ->
         .stroke(Stroke::NONE)
         .corner_radius(10)
         .min_size(Vec2::new(230.0, 40.0))
-}
-
-/// A small rounded label, such as a device's kind. Painted at its own size,
-/// so it stays compact whatever the height of the row it sits in.
-pub fn badge(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), FontId::new(11.0, semibold()), fg);
-    let size = galley.size() + Vec2::new(12.0, 6.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(size.x.max(40.0), size.y), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 5, bg);
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, fg);
 }
 
 /// A checkbox with squarer corners than the buttons: at this size the

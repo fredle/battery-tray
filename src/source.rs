@@ -218,7 +218,7 @@ fn yes() -> bool {
     true
 }
 
-fn parse(json: &str) -> Option<Vec<Reading>> {
+pub fn parse(json: &str) -> Option<Vec<Reading>> {
     // Editors like to save UTF-8 with a byte-order mark.
     let devices: Vec<FakeDevice> = serde_json::from_str(json.trim_start_matches('\u{feff}')).ok()?;
     Some(

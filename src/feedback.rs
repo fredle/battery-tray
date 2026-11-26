@@ -170,6 +170,16 @@ impl Feedback {
         }
     }
 
+    /// Opens the box with a note already started, which the user can
+    /// still edit, send or cancel. (Battery Tray: "Tell us this model".)
+    pub fn open_with(&mut self, text: &str) {
+        if matches!(self.state, State::Closed | State::Sent) {
+            self.state = State::Closed;
+            self.text = text.to_owned();
+            self.open();
+        }
+    }
+
     /// The box itself, as a modal over the window. Call every frame.
     /// `offline` (screenshot mode) never sends anything.
     pub fn show(&mut self, ctx: &egui::Context, version: &str, offline: bool) {
