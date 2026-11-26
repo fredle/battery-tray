@@ -36,6 +36,9 @@ param(
     [int] $Clicks = 6,
     # How long to wait after the flyout closes before measuring again.
     [int] $AfterCloseSeconds = 45,
+    # Put the pointer on the icon this long before each click, as a mouse
+    # does (0: click straight away).
+    [int] $HoverMs = 0,
     [string] $Out
 )
 
@@ -76,7 +79,7 @@ public static class Probe {
         return Shell_NotifyIconGetRect(ref nid, out r) == 0;
     }
 
-    /// Visible top-level windows of these processes titled `title`.
+    /// A visible, on-screen top-level window of these processes titled `title`.
     public static IntPtr VisibleWindow(uint[] pids, string title) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, l) => {
@@ -84,7 +87,9 @@ public static class Probe {
             if (Array.IndexOf(pids, pid) < 0 || !IsWindowVisible(h)) return true;
             var sb = new System.Text.StringBuilder(64);
             GetWindowTextW(h, sb, 64);
-            if (sb.ToString() == title) { found = h; return false; }
+            // On screen: a window drawn off-screen first does not count yet.
+            RECT r; GetWindowRect(h, out r);
+            if (sb.ToString() == title && r.Left > -10000) { found = h; return false; }
             return true;
         }, IntPtr.Zero);
         return found;
@@ -233,7 +238,7 @@ try {
     $watcher = New-Object IO.FileSystemWatcher $data
     $watcher.IncludeSubdirectories = $true
     $watcher.NotifyFilter = [IO.NotifyFilters]'FileName, LastWrite, Size'
-    $handler = { $Event.MessageData.Add("$($EventArgs.ChangeType) $($EventArgs.Name) $(Get-Date -Format HH:mm:ss)") }
+    $handler = { $Event.MessageData.Add("$($Event.TimeGenerated.ToString('HH:mm:ss')) $($EventArgs.ChangeType) $($EventArgs.Name)") }
     $subs = foreach ($name in 'Changed', 'Created', 'Renamed', 'Deleted') {
         Register-ObjectEvent $watcher $name -MessageData $changes -Action $handler
     }
@@ -266,6 +271,10 @@ try {
     # Tray clicks: open, wait, close, several times.
     $clicksOut = @()
     for ($i = 0; $i -lt $Clicks; $i++) {
+        if ($HoverMs -gt 0) {
+            [void][Probe]::PostMessageW($window, $WM_TRAY, [IntPtr]1, [IntPtr]0x0200)
+            Start-Sleep -Milliseconds $HoverMs
+        }
         $pids = [uint32[]]@(Get-Tray | ForEach-Object Id)
         $clock.Restart()
         [void][Probe]::PostMessageW($window, $WM_TRAY, [IntPtr]1, [IntPtr]$WM_LBUTTONUP)
