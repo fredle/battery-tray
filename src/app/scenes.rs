@@ -16,7 +16,7 @@ use crate::history::History;
 
 /// The clock the scenes are set at.
 pub const NOW: u64 = 1_764_000_000;
-pub const COUNT: usize = 7;
+pub const COUNT: usize = 11;
 
 const H: u64 = 3600;
 
@@ -26,17 +26,34 @@ const DEVICES: &str = r#"[
   {"name": "MX Master 3", "kind": "mouse", "le": true, "level": 15, "charging": false},
   {"name": "Xbox Wireless Controller", "kind": "gamepad", "precision": "coarse", "level": 60, "transport": "receiver"},
   {"name": "DualSense", "kind": "gamepad", "precision": "tens", "level": 60, "transport": "usb", "charging": true},
-  {"name": "This PC", "kind": "laptop", "transport": "internal", "level": 86, "charging": false},
+  {"name": "Surface Laptop", "kind": "laptop", "transport": "internal", "level": 86, "charging": false},
   {"name": "WH-1000XM4", "kind": "headphones", "connected": false},
   {"name": "K380 Keyboard", "kind": "keyboard"}
 ]"#;
 
 const MOUSE: &str = "fake-mx master 3";
 const KEYBOARD: &str = "fake-k380 keyboard";
-const LAPTOP: &str = "fake-this pc";
+const LAPTOP: &str = "fake-surface laptop";
+const AIRPODS: &str = "fake-airpods pro";
+const DUALSENSE: &str = "fake-dualsense";
 
-fn devices(rules: &Rules) -> Vec<Device> {
-    let mut readings = crate::source::parse(DEVICES).unwrap_or_default();
+/// The devices of the scenes that show the list as it should be: all with
+/// a level, none unsupported or off. `MOUSE_LEVEL` is filled in.
+const CLEAN: &str = r#"[
+  {"name": "AirPods Pro", "kind": "headphones", "precision": "tens", "parts": [
+    {"kind": "left", "level": 80}, {"kind": "right", "level": 70}, {"kind": "case", "level": 40, "charging": true}]},
+  {"name": "Xbox Wireless Controller", "kind": "gamepad", "precision": "coarse", "level": 60},
+  {"name": "MX Master 3", "kind": "mouse", "transport": "receiver", "level": MOUSE_LEVEL, "charging": false},
+  {"name": "MX Keys", "kind": "keyboard", "le": true, "level": 48, "charging": false},
+  {"name": "DualSense", "kind": "gamepad", "precision": "tens", "level": 60, "transport": "usb", "charging": true},
+  {"name": "Surface Laptop", "kind": "laptop", "transport": "internal", "level": 86, "charging": false}
+]"#;
+
+fn devices(rules: &Rules, json: &str, only: &[&str]) -> Vec<Device> {
+    let mut readings = crate::source::parse(json).unwrap_or_default();
+    if !only.is_empty() {
+        readings.retain(|r| only.contains(&r.id.as_str()));
+    }
     for reading in &mut readings {
         if reading.id == KEYBOARD {
             reading.hardware = Some((0x046d, 0xb342));
@@ -60,9 +77,9 @@ fn devices(rules: &Rules) -> Vec<Device> {
     devices
 }
 
-/// A week of the mouse: charged to full, then a steady discharge to 15%;
-/// and a laptop's day.
-fn history() -> History {
+/// A week of the mouse: charged to full, then a steady discharge to
+/// `mouse_now`; and a laptop's day.
+fn history(mouse_now: u8) -> History {
     let mut history = History::default();
     let start = NOW - 7 * 86_400 + 5 * H;
     let mut t = start;
@@ -76,15 +93,27 @@ fn history() -> History {
     }
     history.record(MOUSE, t, 100, false);
     let from = t;
-    // 85 points to now.
-    for (i, level) in (15..100).rev().enumerate() {
-        history.record(MOUSE, from + (i as u64 + 1) * (NOW - from - 2 * H) / 85, level, false);
+    // One point per percent to now.
+    let steps = u64::from(100 - mouse_now);
+    for (i, level) in (mouse_now..100).rev().enumerate() {
+        history.record(MOUSE, from + (i as u64 + 1) * (NOW - from - 2 * H) / steps, level, false);
     }
     for (i, level) in (86..=100).rev().enumerate() {
         history.record(LAPTOP, NOW - 4 * H + i as u64 * 15 * 60, level, false);
     }
     history
 }
+
+/// What a scene shows and with which devices.
+struct Setup {
+    json: String,
+    mouse_now: u8,
+    /// The devices to keep; all when empty. The scenes that need room for
+    /// a graph or the taskbar show four.
+    only: &'static [&'static str],
+}
+
+const FOUR: &[&str] = &[AIRPODS, DUALSENSE, MOUSE, LAPTOP];
 
 pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
     app.settings = crate::settings::Settings::default();
@@ -93,7 +122,15 @@ pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
     app.expanded.clear();
     app.unlock_open = false;
     app.shot_flyout = true;
+    app.stage = None;
+    // A note left open by the last scene is closed.
+    app.feedback = crate::feedback::Feedback::default();
+    app.feedback.set_texts(app.lang.feedback_texts());
+    // Every scene starts at the window's own size; a scene may change it.
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(flyout::WIDTH, flyout::PINNED_HEIGHT)));
     let licensed = Some("you@example.com".to_owned());
+    let mut setup = Setup { json: DEVICES.to_owned(), mouse_now: 15, only: &[] };
+    let clean = |mouse_now: u8, only| Setup { json: CLEAN.replace("MOUSE_LEVEL", &mouse_now.to_string()), mouse_now, only };
     match scene {
         // The flyout as a new user first sees it.
         0 => {}
@@ -102,7 +139,7 @@ pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
             app.licensed_to = licensed;
             app.settings.pin_hint_done = true;
             app.expanded.insert(MOUSE.into());
-            app.settings.set_tray_list(vec![MOUSE.into(), "fake-airpods pro".into()]);
+            app.settings.set_tray_list(vec![MOUSE.into(), AIRPODS.into()]);
         }
         // Free, the same card: what the unlock adds.
         2 => {
@@ -113,8 +150,8 @@ pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
         3 => {
             app.licensed_to = licensed;
             app.page = Page::Settings;
-            app.settings.set_tray_list(vec![MOUSE.into(), "fake-airpods pro".into()]);
-            app.settings.thresholds.insert("fake-airpods pro".into(), 30);
+            app.settings.set_tray_list(vec![MOUSE.into(), AIRPODS.into()]);
+            app.settings.thresholds.insert(AIRPODS.into(), 30);
             app.settings.notify_full = true;
         }
         // Settings, free.
@@ -123,17 +160,59 @@ pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
         5 => {
             app.settings.pin_hint_done = true;
             app.shot_flyout = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(flyout::WIDTH, flyout::PINNED_HEIGHT)));
         }
         // "Tell us this model", filled in and waiting for the user.
-        _ => {
+        6 => {
             app.settings.pin_hint_done = true;
             app.shot_flyout = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(flyout::WIDTH, flyout::PINNED_HEIGHT)));
+            setup.only = &[AIRPODS, DUALSENSE, KEYBOARD, MOUSE];
+        }
+        // The list as it should look: every kind of device, each with a
+        // level, nothing unsupported, nothing low.
+        7 => {
+            app.settings.pin_hint_done = true;
+            setup = clean(72, &[]);
+        }
+        // The flyout where it opens, over the taskbar's corner: three
+        // devices with a tray icon each, one of them low, one charging.
+        8 => {
+            app.licensed_to = licensed;
+            app.settings.pin_hint_done = true;
+            app.settings.set_tray_list(vec![AIRPODS.into(), MOUSE.into(), DUALSENSE.into()]);
+            app.shot_flyout = false;
+            setup = clean(15, FOUR);
+        }
+        // Unlocked: a device below its warning level, and its week.
+        9 => {
+            app.licensed_to = licensed;
+            app.settings.pin_hint_done = true;
+            app.expanded.insert(MOUSE.into());
+            app.settings.set_tray_list(vec![MOUSE.into(), AIRPODS.into()]);
+            setup = clean(15, FOUR);
+        }
+        // Unlocked: the week and the time left of a device that is fine.
+        _ => {
+            app.licensed_to = licensed;
+            app.settings.pin_hint_done = true;
+            app.expanded.insert(MOUSE.into());
+            app.settings.set_tray_list(vec![MOUSE.into(), AIRPODS.into()]);
+            setup = clean(41, FOUR);
         }
     }
+    if matches!(scene, 5 | 6) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(flyout::WIDTH, flyout::PINNED_HEIGHT)));
+    }
     let rules = app.rules();
-    let devices = devices(&rules);
+    let devices = devices(&rules, &setup.json, setup.only);
+    if scene == 8 {
+        // Light or dark follows the theme asked for; the icons' own colours
+        // follow the taskbar.
+        let dark = ctx.theme() == egui::Theme::Dark;
+        let icons = rules.tray_devices(&devices).into_iter().map(|d| crate::tray::look(d, &rules, !dark)).collect::<Vec<_>>();
+        app.stage = icons.try_into().ok().map(|icons| taskbar::Stage { icons });
+        app.stage_height = 480.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(taskbar::WIDTH, taskbar::canvas_height(app.stage_height))));
+    }
     if scene == 6
         && let Some(keyboard) = devices.iter().find(|d| d.id == KEYBOARD)
     {
@@ -141,8 +220,8 @@ pub fn set_up(app: &mut App, scene: usize, ctx: &egui::Context) {
     }
     let mut shared = lock(&app.shared);
     shared.devices = devices;
-    shared.history = history();
+    shared.history = history(setup.mouse_now);
     shared.rules = rules;
     shared.polled = true;
-    shared.window.mode = if app.shot_flyout { Mode::Flyout } else { Mode::Pinned };
+    shared.window.mode = if app.shot_flyout || app.stage.is_some() { Mode::Flyout } else { Mode::Pinned };
 }

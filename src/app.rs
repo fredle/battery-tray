@@ -30,6 +30,8 @@ use crate::tray;
 
 /// The made-up scenes of screenshot mode.
 mod scenes;
+/// The taskbar corner some of them are drawn over.
+mod taskbar;
 
 const APP_NAME: &str = "Battery Tray";
 /// Space between the window edge and its contents.
@@ -145,6 +147,10 @@ pub struct App {
     shots: Option<Shots>,
     /// Screenshot mode: the scene shows the flyout, sized to its content.
     shot_flyout: bool,
+    /// Screenshot mode: the flyout is drawn over a taskbar and desktop.
+    stage: Option<taskbar::Stage>,
+    /// The flyout's height in that scene, as last measured.
+    stage_height: f32,
     /// Windows' symbol font is loaded, for a device name that needs it.
     symbols: bool,
     /// The flyout height last asked of Windows, and for which show.
@@ -252,6 +258,8 @@ impl App {
             styled_dark: None,
             shots,
             shot_flyout: false,
+            stage: None,
+            stage_height: 0.0,
             symbols,
             asked_height: 0.0,
             asked_for_show: 0,
@@ -1067,8 +1075,8 @@ fn open(target: &str) {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui_root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui_root.ctx().clone();
+    fn ui(&mut self, ui_screen: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui_screen.ctx().clone();
         if let Some(scene) = self.shots.as_mut().and_then(|shots| shots.drive(&ctx, scenes::COUNT)) {
             scenes::set_up(self, scene, &ctx);
         }
@@ -1147,6 +1155,19 @@ impl eframe::App for App {
             self.styled_dark = Some(dark);
             self.own_border = !flyout::style(w, [p.border.r(), p.border.g(), p.border.b()]);
         }
+        // A staged scene draws the window's own contents in the flyout's
+        // place, over a desktop and taskbar.
+        let screen = ui_screen.max_rect();
+        let screen_painter = ui_screen.painter().clone();
+        let staged_rect = taskbar::flyout_rect(screen, self.stage_height);
+        let mut staged;
+        let ui_root: &mut egui::Ui = if self.stage.is_some() {
+            taskbar::backdrop(&screen_painter, screen, staged_rect, dark);
+            staged = ui_screen.new_child(egui::UiBuilder::new().max_rect(staged_rect));
+            &mut staged
+        } else {
+            ui_screen
+        };
         let bare = |top: i8, bottom: i8| {
             egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: GUTTER, right: GUTTER, top, bottom })
         };
@@ -1190,7 +1211,15 @@ impl eframe::App for App {
         let wanted = (header + footer + content + 8.0 + 2.0).clamp(flyout::MIN_HEIGHT, flyout::MAX_HEIGHT);
         lock(&self.shared).window.height = wanted;
         let current = ctx.content_rect().height();
-        if (wanted - current).abs() > 1.5 {
+        if let Some(stage) = self.stage {
+            self.stage_height = wanted;
+            let canvas = taskbar::canvas_height(wanted);
+            if (canvas - current).abs() > 1.5 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(taskbar::WIDTH, canvas)));
+            }
+            taskbar::flyout_corners(&screen_painter, screen, staged_rect, dark, p.border);
+            taskbar::taskbar(&ctx, &screen_painter, screen, dark, self.lang, &stage);
+        } else if (wanted - current).abs() > 1.5 {
             if self.shots.is_some() {
                 if self.shot_flyout {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(flyout::WIDTH, wanted)));
@@ -1207,7 +1236,7 @@ impl eframe::App for App {
             }
         }
 
-        if self.own_border || self.shots.is_some() {
+        if self.own_border || (self.shots.is_some() && self.stage.is_none()) {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("border")));
             painter.rect_stroke(ctx.content_rect(), 0, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
         }

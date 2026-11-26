@@ -424,7 +424,7 @@ fn icon_id(device: &str, used: &[u32]) -> u32 {
 }
 
 /// How a device's icon looks right now.
-fn look(device: &Device, rules: &Rules, light_taskbar: bool) -> Spec {
+pub(crate) fn look(device: &Device, rules: &Rules, light_taskbar: bool) -> Spec {
     let tone = |level: u8| {
         if device.is_charging() {
             Tone::Charging
